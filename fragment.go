@@ -22,9 +22,11 @@ type LocationGetter interface {
 
 type Fragment interface {
 	LocationGetter
+	clone(cloning *_cloning) Fragment
 }
 
 // Library is the RAML 1.0 Library
+// Be aware that adding new fields to this struct will require updating the UnmarshalYAML and clone methods.
 type Library struct {
 	Id              string
 	Usage           string
@@ -40,6 +42,46 @@ type Library struct {
 	raml     *RAML
 }
 
+func (l *Library) clone(cloning *_cloning) Fragment {
+	if l == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[l]; ok {
+		return cloned.(Fragment)
+	}
+	clone := cloning.raml.MakeLibrary(l.Location)
+	clone.Id = l.Id
+	clone.Usage = l.Usage
+	if l.CustomDomainProperties != nil {
+		clone.CustomDomainProperties = make(CustomDomainProperties, len(l.CustomDomainProperties))
+		for k, v := range l.CustomDomainProperties {
+			clone.CustomDomainProperties[k] = v.clone(cloning)
+		}
+	}
+	if l.Types != nil {
+		clone.Types = make(map[string]*Shape, len(l.Types))
+		for k, v := range l.Types {
+			cv := (*v).clone(cloning)
+			clone.Types[k] = &cv
+		}
+	}
+	if l.AnnotationTypes != nil {
+		clone.AnnotationTypes = make(map[string]*Shape, len(l.AnnotationTypes))
+		for k, v := range l.AnnotationTypes {
+			cv := (*v).clone(cloning)
+			clone.AnnotationTypes[k] = &cv
+		}
+	}
+	if l.Uses != nil {
+		clone.Uses = make(map[string]*LibraryLink, len(l.Uses))
+		for k, v := range l.Uses {
+			clone.Uses[k] = v.clone(cloning)
+		}
+	}
+	cloning.cloned[l] = clone
+	return clone
+}
+
 func (l *Library) GetLocation() string {
 	return l.Location
 }
@@ -52,6 +94,26 @@ type LibraryLink struct {
 
 	Location string
 	Position
+}
+
+func (l *LibraryLink) clone(cloning *_cloning) *LibraryLink {
+	if l == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[l]; ok {
+		return cloned.(*LibraryLink)
+	}
+	clone := &LibraryLink{
+		Id:       l.Id,
+		Value:    l.Value,
+		Location: l.Location,
+		Position: l.Position,
+	}
+	if l.Link != nil {
+		clone.Link = l.Link.clone(cloning).(*Library)
+	}
+	cloning.cloned[l] = clone
+	return clone
 }
 
 // UnmarshalYAML unmarshals a Library from a yaml.Node, implementing the yaml.Unmarshaler interface
@@ -149,6 +211,31 @@ type DataType struct {
 	raml     *RAML
 }
 
+func (dt *DataType) clone(cloning *_cloning) Fragment {
+	if dt == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[dt]; ok {
+		return cloned.(Fragment)
+	}
+	clone := cloning.raml.MakeDataType(dt.Location)
+	clone.Id = dt.Id
+	clone.Usage = dt.Usage
+	if dt.Shape != nil {
+		shape := *dt.Shape
+		clonedShape := shape.clone(cloning)
+		clone.Shape = &clonedShape
+	}
+	if dt.Uses != nil {
+		clone.Uses = make(map[string]*LibraryLink, len(dt.Uses))
+		for k, v := range dt.Uses {
+			clone.Uses[k] = v.clone(cloning)
+		}
+	}
+	cloning.cloned[dt] = clone
+	return clone
+}
+
 func (dt *DataType) GetLocation() string {
 	return dt.Location
 }
@@ -232,6 +319,25 @@ type NamedExample struct {
 
 	Location string
 	raml     *RAML
+}
+
+func (ne *NamedExample) clone(cloning *_cloning) Fragment {
+	if ne == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[ne]; ok {
+		return cloned.(Fragment)
+	}
+	clone := cloning.raml.MakeNamedExample(ne.Location)
+	clone.Id = ne.Id
+	if ne.Examples != nil {
+		clone.Examples = make(map[string]*Example, len(ne.Examples))
+		for k, v := range ne.Examples {
+			clone.Examples[k] = v.clone(cloning)
+		}
+	}
+	cloning.cloned[ne] = clone
+	return clone
 }
 
 func (ne *NamedExample) GetLocation() string {

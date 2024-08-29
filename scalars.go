@@ -11,6 +11,21 @@ type EnumFacets struct {
 	Enum Nodes
 }
 
+func (f *EnumFacets) clone(cloning *_cloning) *EnumFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*EnumFacets)
+	}
+	clone := &EnumFacets{}
+	if f.Enum != nil {
+		clone.Enum = f.Enum.clone(cloning)
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 func (r *RAML) MakeEnum(v *yaml.Node, location string) (Nodes, error) {
 	if v.Kind != yaml.SequenceNode {
 		return nil, NewError("enum must be sequence node", location, WithNodePosition(v))
@@ -30,10 +45,54 @@ type FormatFacets struct {
 	Format *string
 }
 
+func (f *FormatFacets) clone(cloning *_cloning) *FormatFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*FormatFacets)
+	}
+	clone := &FormatFacets{
+		Format: cloneStringPtr(f.Format),
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 type IntegerFacets struct {
 	Minimum    *big.Int
 	Maximum    *big.Int
 	MultipleOf *float64
+}
+
+func cloneInt64Ptr(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	return &*v
+}
+
+func cloneBigIntPtr(v *big.Int) *big.Int {
+	if v == nil {
+		return nil
+	}
+	return big.NewInt(0).Set(v)
+}
+
+func (f *IntegerFacets) clone(cloning *_cloning) *IntegerFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*IntegerFacets)
+	}
+	clone := &IntegerFacets{
+		Minimum:    cloneBigIntPtr(f.Minimum),
+		Maximum:    cloneBigIntPtr(f.Maximum),
+		MultipleOf: cloneInt64Ptr(f.MultipleOf),
+	}
+	cloning.cloned[f] = clone
+	return clone
 }
 
 type IntegerShape struct {
@@ -42,6 +101,23 @@ type IntegerShape struct {
 	EnumFacets
 	FormatFacets
 	IntegerFacets
+}
+
+func (s *IntegerShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*IntegerShape)
+	}
+	clone := &IntegerShape{
+		BaseShape:     *s.BaseShape.clone(cloning),
+		EnumFacets:    *s.EnumFacets.clone(cloning),
+		FormatFacets:  *s.FormatFacets.clone(cloning),
+		IntegerFacets: *s.IntegerFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *IntegerShape) Base() *BaseShape {
@@ -167,12 +243,52 @@ type NumberFacets struct {
 	MultipleOf *float64
 }
 
+func cloneFloat64Ptr(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	return &*v
+}
+
+func (f *NumberFacets) clone(cloning *_cloning) *NumberFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*NumberFacets)
+	}
+	clone := &NumberFacets{
+		Minimum:    cloneFloat64Ptr(f.Minimum),
+		Maximum:    cloneFloat64Ptr(f.Maximum),
+		MultipleOf: cloneFloat64Ptr(f.MultipleOf),
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 type NumberShape struct {
 	BaseShape
 
 	EnumFacets
 	FormatFacets
 	NumberFacets
+}
+
+func (s *NumberShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*NumberShape)
+	}
+	clone := &NumberShape{
+		BaseShape:    *s.BaseShape.clone(cloning),
+		EnumFacets:   *s.EnumFacets.clone(cloning),
+		FormatFacets: *s.FormatFacets.clone(cloning),
+		NumberFacets: *s.NumberFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *NumberShape) Base() *BaseShape {
@@ -268,9 +384,39 @@ type LengthFacets struct {
 	MinLength *uint64
 }
 
+func (f *LengthFacets) clone(cloning *_cloning) *LengthFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*LengthFacets)
+	}
+	clone := &LengthFacets{
+		MaxLength: cloneUint64Ptr(f.MaxLength),
+		MinLength: cloneUint64Ptr(f.MinLength),
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 type StringFacets struct {
 	LengthFacets
 	Pattern *regexp.Regexp
+}
+
+func (f *StringFacets) clone(cloning *_cloning) *StringFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*StringFacets)
+	}
+	clone := &StringFacets{
+		LengthFacets: *f.LengthFacets.clone(cloning),
+		Pattern:      f.Pattern,
+	}
+	cloning.cloned[f] = clone
+	return clone
 }
 
 type StringShape struct {
@@ -278,6 +424,22 @@ type StringShape struct {
 
 	EnumFacets
 	StringFacets
+}
+
+func (s *StringShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*StringShape)
+	}
+	clone := &StringShape{
+		BaseShape:    *s.BaseShape.clone(cloning),
+		EnumFacets:   *s.EnumFacets.clone(cloning),
+		StringFacets: *s.StringFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *StringShape) Base() *BaseShape {
@@ -365,11 +527,42 @@ type FileFacets struct {
 	FileTypes Nodes
 }
 
+func (f *FileFacets) clone(cloning *_cloning) *FileFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*FileFacets)
+	}
+	clone := &FileFacets{}
+	if f.FileTypes != nil {
+		clone.FileTypes = f.FileTypes.clone(cloning)
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 type FileShape struct {
 	BaseShape
 
 	LengthFacets
 	FileFacets
+}
+
+func (s *FileShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*FileShape)
+	}
+	clone := &FileShape{
+		BaseShape:    *s.BaseShape.clone(cloning),
+		LengthFacets: *s.LengthFacets.clone(cloning),
+		FileFacets:   *s.FileFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *FileShape) Base() *BaseShape {
@@ -455,6 +648,21 @@ type BooleanShape struct {
 	EnumFacets
 }
 
+func (s *BooleanShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*BooleanShape)
+	}
+	clone := &BooleanShape{
+		BaseShape:  *s.BaseShape.clone(cloning),
+		EnumFacets: *s.EnumFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *BooleanShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -511,6 +719,21 @@ type DateTimeShape struct {
 	FormatFacets
 }
 
+func (s *DateTimeShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*DateTimeShape)
+	}
+	clone := &DateTimeShape{
+		BaseShape:    *s.BaseShape.clone(cloning),
+		FormatFacets: *s.FormatFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *DateTimeShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -565,6 +788,20 @@ type DateTimeOnlyShape struct {
 	BaseShape
 }
 
+func (s *DateTimeOnlyShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*DateTimeOnlyShape)
+	}
+	clone := &DateTimeOnlyShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *DateTimeOnlyShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -593,6 +830,20 @@ func (s *DateTimeOnlyShape) unmarshalYAMLNodes(v []*yaml.Node) error {
 
 type DateOnlyShape struct {
 	BaseShape
+}
+
+func (s *DateOnlyShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*DateOnlyShape)
+	}
+	clone := &DateOnlyShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *DateOnlyShape) Base() *BaseShape {
@@ -625,6 +876,20 @@ type TimeOnlyShape struct {
 	BaseShape
 }
 
+func (s *TimeOnlyShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*TimeOnlyShape)
+	}
+	clone := &TimeOnlyShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *TimeOnlyShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -655,6 +920,20 @@ type AnyShape struct {
 	BaseShape
 }
 
+func (s *AnyShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*AnyShape)
+	}
+	clone := &AnyShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *AnyShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -683,6 +962,20 @@ func (s *AnyShape) unmarshalYAMLNodes(v []*yaml.Node) error {
 
 type NilShape struct {
 	BaseShape
+}
+
+func (s *NilShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*NilShape)
+	}
+	clone := &NilShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *NilShape) Base() *BaseShape {

@@ -13,6 +13,21 @@ import (
 
 type Nodes []*Node
 
+func (n *Nodes) clone(cloning *_cloning) Nodes {
+	if n == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[n]; ok {
+		return cloned.(Nodes)
+	}
+	cloned := make(Nodes, 0)
+	for _, node := range *n {
+		cloned = append(cloned, node.clone(cloning))
+	}
+	cloning.cloned[n] = cloned
+	return cloned
+}
+
 func (n Nodes) String() string {
 	vals := make([]string, len(n))
 	for i, node := range n {
@@ -30,6 +45,27 @@ type Node struct {
 	Location string
 	Position
 	raml *RAML
+}
+
+func (n *Node) clone(cloning *_cloning) *Node {
+	if n == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[n]; ok {
+		return cloned.(*Node)
+	}
+	clone := &Node{
+		Id:       n.Id,
+		Value:    n.Value,
+		Location: n.Location,
+		Position: n.Position,
+		raml:     cloning.raml,
+	}
+	if n.Link != nil {
+		clone.Link = n.Link.clone(cloning)
+	}
+	cloning.cloned[n] = clone
+	return clone
 }
 
 func (n *Node) String() string {

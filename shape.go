@@ -33,6 +33,66 @@ type BaseShape struct {
 	Position
 }
 
+func cloneStringPtr(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	return &*s
+}
+
+func cloneBoolPtr(b *bool) *bool {
+	if b == nil {
+		return nil
+	}
+	return &*b
+}
+
+// clone clones the base shape.
+func (s *BaseShape) clone(cloning *_cloning) *BaseShape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(*BaseShape)
+	}
+	clone := &BaseShape{
+		Id:          s.Id,
+		Name:        s.Name,
+		DisplayName: cloneStringPtr(s.DisplayName),
+		Description: cloneStringPtr(s.Description),
+		Type:        s.Type,
+		Example:     s.Example.clone(cloning),
+		Examples:    s.Examples.clone(cloning),
+		Default:     s.Default.clone(cloning),
+		Required:    cloneBoolPtr(s.Required),
+		unwrapped:   s.unwrapped,
+		Location:    s.Location,
+		Position:    s.Position,
+		raml:        cloning.raml,
+	}
+	if s.CustomShapeFacets != nil {
+		clone.CustomShapeFacets = s.CustomShapeFacets.clone(cloning)
+	}
+	if s.CustomShapeFacetDefinitions != nil {
+		clone.CustomShapeFacetDefinitions = s.CustomShapeFacetDefinitions.clone(cloning)
+	}
+	if s.CustomDomainProperties != nil {
+		clone.CustomDomainProperties = s.CustomDomainProperties.clone(cloning)
+	}
+	if s.Link != nil {
+		clone.Link = s.Link.clone(cloning).(*DataType)
+	}
+	if s.Inherits != nil {
+		clone.Inherits = make([]*Shape, len(s.Inherits))
+		for i, v := range s.Inherits {
+			clonedV := (*v).clone(cloning)
+			clone.Inherits[i] = &clonedV
+		}
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 // IsUnwrapped returns true if the shape is unwrapped.
 func (s *BaseShape) IsUnwrapped() bool {
 	return s.unwrapped
@@ -66,6 +126,32 @@ type Examples struct {
 	Position
 
 	raml *RAML
+}
+
+func (e *Examples) clone(cloning *_cloning) *Examples {
+	if e == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[e]; ok {
+		return cloned.(*Examples)
+	}
+	clone := &Examples{
+		Id:       e.Id,
+		Location: e.Location,
+		Position: e.Position,
+		raml:     cloning.raml,
+	}
+	if e.Examples != nil {
+		clone.Examples = make(map[string]*Example, len(e.Examples))
+		for k, v := range e.Examples {
+			clone.Examples[k] = v.clone(cloning)
+		}
+	}
+	if e.Link != nil {
+		clone.Link = e.Link.clone(cloning).(*NamedExample)
+	}
+	cloning.cloned[e] = clone
+	return clone
 }
 
 // ShapeBaser is the interface that represents a retriever of a base shape.
@@ -109,6 +195,7 @@ type Shape interface {
 	ShapeBaser
 	yamlNodesUnmarshaller
 	fmt.Stringer
+	clone(cloning *_cloning) Shape
 }
 
 // identifyShapeType identifies the type of the shape.

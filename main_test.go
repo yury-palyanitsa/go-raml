@@ -1,6 +1,7 @@
 package raml
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"testing"
@@ -32,8 +33,17 @@ func Test_main(t *testing.T) {
 		fmt.Printf("Shape: %s: resolved: %v: unwrapped: %v\n", shape, !unresolved, shape.Base().unwrapped)
 	}
 
-	fmt.Printf("Resolved: %d\n", resolved)
-	fmt.Printf("Unresolved: %d\n", unresolved)
+	cloned := rml.Clone(context.Background())
+	shapesAll = cloned.GetShapes()
+	fmt.Printf("Total cloned shapes: %d\n", len(shapesAll))
+
+	for _, shape := range shapesAll {
+		s, unresolved := shape.(*UnknownShape)
+		if unresolved {
+			t.Errorf("Unknown cloned shape found %s", s.Name)
+		}
+		fmt.Printf("Cloned shape: %s: resolved: %v: unwrapped: %v\n", shape, !unresolved, shape.Base().unwrapped)
+	}
 
 	printMemUsage(t)
 }

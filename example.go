@@ -36,3 +36,30 @@ type Example struct {
 	Position
 	raml *RAML
 }
+
+func (e *Example) clone(cloning *_cloning) *Example {
+	if e == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[e]; ok {
+		return cloned.(*Example)
+	}
+	clone := &Example{
+		Id:          e.Id,
+		Name:        e.Name,
+		DisplayName: e.DisplayName,
+		Description: e.Description,
+		Value:       e.Value,
+		Location:    e.Location,
+		Position:    e.Position,
+		raml:        cloning.raml,
+	}
+	if e.CustomDomainProperties != nil {
+		clone.CustomDomainProperties = make(CustomDomainProperties, len(e.CustomDomainProperties))
+		for k, v := range e.CustomDomainProperties {
+			clone.CustomDomainProperties[k] = v.clone(cloning)
+		}
+	}
+	cloning.cloned[e] = clone
+	return clone
+}
