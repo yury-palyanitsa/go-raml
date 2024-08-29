@@ -14,11 +14,46 @@ type ArrayFacets struct {
 	UniqueItems bool
 }
 
+func (f *ArrayFacets) clone(cloning *_cloning) *ArrayFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*ArrayFacets)
+	}
+	clone := &ArrayFacets{
+		MinItems:    cloneUint64Ptr(f.MinItems),
+		MaxItems:    cloneUint64Ptr(f.MaxItems),
+		UniqueItems: f.UniqueItems,
+	}
+	if f.Items != nil {
+		clonedItems := (*f.Items).clone(cloning)
+		clone.Items = &clonedItems
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 // ArrayShape represents an array shape.
 type ArrayShape struct {
 	BaseShape
 
 	ArrayFacets
+}
+
+func (a *ArrayShape) clone(cloning *_cloning) Shape {
+	if a == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[a]; ok {
+		return cloned.(Shape)
+	}
+	clone := &ArrayShape{
+		BaseShape:   *a.BaseShape.clone(cloning),
+		ArrayFacets: *a.ArrayFacets.clone(cloning),
+	}
+	cloning.cloned[a] = clone
+	return clone
 }
 
 // Base returns the base shape.
@@ -138,6 +173,13 @@ func (s *ArrayShape) unmarshalYAMLNodes(v []*yaml.Node) error {
 	return nil
 }
 
+func cloneUint64Ptr(v *uint64) *uint64 {
+	if v == nil {
+		return nil
+	}
+	return &*v
+}
+
 // ObjectFacets contains constraints for object shapes.
 type ObjectFacets struct {
 	Discriminator        string
@@ -148,11 +190,51 @@ type ObjectFacets struct {
 	MaxProperties        *uint64
 }
 
+func (f *ObjectFacets) clone(cloning *_cloning) *ObjectFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*ObjectFacets)
+	}
+	clone := &ObjectFacets{
+		Discriminator:        f.Discriminator,
+		DiscriminatorValue:   cloneAny(cloning, f.DiscriminatorValue),
+		AdditionalProperties: f.AdditionalProperties,
+		MinProperties:        cloneUint64Ptr(f.MinProperties),
+		MaxProperties:        cloneUint64Ptr(f.MaxProperties),
+	}
+	if f.Properties != nil {
+		clone.Properties = make(map[string]Property, len(f.Properties))
+		for k, v := range f.Properties {
+			clonedProperty := v.clone(cloning)
+			clone.Properties[k] = *clonedProperty
+		}
+	}
+	cloning.cloned[f] = clone
+	return clone
+}
+
 // ObjectShape represents an object shape.
 type ObjectShape struct {
 	BaseShape
 
 	ObjectFacets
+}
+
+func (s *ObjectShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(Shape)
+	}
+	clone := &ObjectShape{
+		BaseShape:    *s.BaseShape.clone(cloning),
+		ObjectFacets: *s.ObjectFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 // func (s *ObjectShape) Validate(v interface{}) error {
@@ -328,9 +410,48 @@ type Property struct {
 	raml     *RAML
 }
 
+func (p *Property) clone(cloning *_cloning) *Property {
+	if p == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[p]; ok {
+		return cloned.(*Property)
+	}
+	clone := &Property{
+		Name:     p.Name,
+		Required: p.Required,
+		raml:     cloning.raml,
+	}
+	if p.Shape != nil {
+		shapeClone := (*p.Shape).clone(cloning)
+		clone.Shape = &shapeClone
+	}
+	cloning.cloned[p] = clone
+	return clone
+}
+
 // UnionFacets contains constraints for union shapes.
 type UnionFacets struct {
 	AnyOf []*Shape
+}
+
+func (f *UnionFacets) clone(cloning *_cloning) *UnionFacets {
+	if f == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[f]; ok {
+		return cloned.(*UnionFacets)
+	}
+	clone := &UnionFacets{}
+	if f.AnyOf != nil {
+		clone.AnyOf = make([]*Shape, len(f.AnyOf))
+		for i, item := range f.AnyOf {
+			shape := (*item).clone(cloning)
+			clone.AnyOf[i] = &shape
+		}
+	}
+	cloning.cloned[f] = clone
+	return clone
 }
 
 // UnionShape represents a union shape.
@@ -339,6 +460,22 @@ type UnionShape struct {
 
 	EnumFacets
 	UnionFacets
+}
+
+func (s *UnionShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(Shape)
+	}
+	clone := &UnionShape{
+		BaseShape:   *s.BaseShape.clone(cloning),
+		EnumFacets:  *s.EnumFacets.clone(cloning),
+		UnionFacets: *s.UnionFacets.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 // UnmarshalYAMLNodes unmarshals the union shape from YAML nodes.
@@ -403,6 +540,20 @@ type JSONShape struct {
 	BaseShape
 }
 
+func (s *JSONShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(Shape)
+	}
+	clone := &JSONShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+	}
+	cloning.cloned[s] = clone
+	return clone
+}
+
 func (s *JSONShape) Base() *BaseShape {
 	return &s.BaseShape
 }
@@ -433,6 +584,21 @@ type UnknownShape struct {
 	BaseShape
 
 	facets []*yaml.Node
+}
+
+func (s *UnknownShape) clone(cloning *_cloning) Shape {
+	if s == nil {
+		return nil
+	}
+	if cloned, ok := cloning.cloned[s]; ok {
+		return cloned.(Shape)
+	}
+	clone := &UnknownShape{
+		BaseShape: *s.BaseShape.clone(cloning),
+		facets:    s.facets,
+	}
+	cloning.cloned[s] = clone
+	return clone
 }
 
 func (s *UnknownShape) Base() *BaseShape {

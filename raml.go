@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"reflect"
 )
 
 // RAML is a store for all fragments and shapes.
@@ -142,4 +143,115 @@ func (r *RAML) PutFragment(location string, fragment Fragment) {
 	if _, ok := r.fragmentsCache[location]; !ok {
 		r.fragmentsCache[location] = fragment
 	}
+}
+
+type _cloning struct {
+	raml   *RAML
+	cloned map[interface{}]interface{}
+}
+
+type cloner interface {
+	clone(cloning *_cloning) interface{}
+}
+
+func cloneAny(cloning *_cloning, obj interface{}) interface{} {
+	if clone, ok := cloning.cloned[obj]; ok {
+		return clone
+	}
+	if obj == nil {
+		return nil
+	}
+	if c, ok := obj.(cloner); ok {
+		return c.clone(cloning)
+	}
+	// if obj is pointer, deep copy of the object
+	if reflect.TypeOf(obj).Kind() == reflect.Ptr {
+		clone := reflect.New(reflect.TypeOf(obj).Elem()).Interface()
+		reflect.ValueOf(clone).Elem().Set(reflect.ValueOf(obj).Elem())
+		cloning.cloned[obj] = clone
+		return clone
+	}
+
+	cloning.cloned[obj] = obj
+	return obj
+}
+
+func newCloning(raml *RAML) *_cloning {
+	cloning := &_cloning{
+		// raml is the clone of the original RAML.
+		raml: raml,
+		// cloned is a map of original objects to cloned objects.
+		cloned: make(map[interface{}]interface{}),
+	}
+	cloning.cloned[nil] = nil
+	return cloning
+}
+
+// Clone makes a deep copy of the RAML with a new context.
+func (r *RAML) Clone(ctx context.Context) *RAML {
+	if r == nil {
+		return nil
+	}
+	clone := &RAML{}
+	clone.ctx = ctx
+	cloning := newCloning(clone)
+	if r.entryPoint != nil {
+		clone.entryPoint = r.entryPoint.clone(cloning)
+	}
+	// Clone fragments to fragments cache
+	if r.fragmentsCache != nil {
+		clone.fragmentsCache = make(map[string]Fragment)
+		for fragKey, frag := range r.fragmentsCache {
+			if frag == nil {
+				clone.fragmentsCache[fragKey] = nil
+				continue
+			}
+			clone.fragmentsCache[fragKey] = frag.clone(cloning)
+		}
+	}
+	if r.fragmentShapes != nil {
+		clone.fragmentShapes = make(map[string]map[string]*Shape)
+		// Clone shapes to shapes and unresolved shapes
+		for fragKey, shapes := range r.fragmentShapes {
+			if shapes != nil {
+				for shapeKey, shape := range shapes {
+					if clone.fragmentShapes[fragKey] == nil {
+						clone.fragmentShapes[fragKey] = make(map[string]*Shape)
+					}
+					if shape == nil {
+						clone.fragmentShapes[fragKey][shapeKey] = nil
+						continue
+					}
+					clonedShape := (*shape).clone(cloning)
+					clone.fragmentShapes[fragKey][shapeKey] = &clonedShape
+				}
+			} else {
+				clone.fragmentShapes[fragKey] = nil
+			}
+		}
+	}
+	if r.shapes != nil {
+		clone.shapes = make([]*Shape, 0, len(r.shapes))
+		for _, shape := range r.shapes {
+			shapeClone := (*shape).clone(cloning)
+			clone.shapes = append(clone.shapes, &shapeClone)
+		}
+	}
+	if r.domainExtensions != nil {
+		clone.domainExtensions = make([]*DomainExtension, 0, len(r.domainExtensions))
+		for _, ext := range r.domainExtensions {
+			extClone := ext.clone(cloning)
+			clone.domainExtensions = append(clone.domainExtensions, extClone)
+		}
+	}
+	// clone unresolved shapes
+	if r.unresolvedShapes.Len() > 0 {
+		clone.unresolvedShapes = list.List{}
+		for e := r.unresolvedShapes.Front(); e != nil; e = e.Next() {
+			value := cloneAny(cloning, e.Value)
+			clone.unresolvedShapes.PushBack(value)
+		}
+	}
+
+	return clone
 }
