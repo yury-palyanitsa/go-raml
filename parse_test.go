@@ -16,8 +16,8 @@ import (
 )
 
 func writeToDiskHelper(t *testing.T, tt struct {
-	name string
-	typeName string
+	name      string
+	typeName  string
 	outSchema *JSONSchemaRAML
 }) {
 	outputDir := "./test_output"
@@ -35,7 +35,6 @@ func writeToDiskHelper(t *testing.T, tt struct {
 	}
 	t.Logf("Successfully wrote JSON Schema to %s", outputPath)
 }
-
 
 func Test_ParseFixturesIntegration(t *testing.T) {
 	// Define test cases for valid fixtures that should parse successfully
@@ -107,7 +106,11 @@ func Test_ParseFixturesIntegration(t *testing.T) {
 						s := pair.Value
 						typeName := pair.Key
 						outSchema, err := conv.Convert(s.Shape)
-						writeToDiskHelper(t, struct{name string; typeName string; outSchema *JSONSchemaRAML}{name: tt.name, typeName: typeName, outSchema: outSchema})
+						writeToDiskHelper(t, struct {
+							name      string
+							typeName  string
+							outSchema *JSONSchemaRAML
+						}{name: tt.name, typeName: typeName, outSchema: outSchema})
 						require.NoError(t, err, "Failed to convert annotation type shape in %s: %v", tt.path, err)
 						convertedCount++
 					}
@@ -115,14 +118,22 @@ func Test_ParseFixturesIntegration(t *testing.T) {
 						s := pair.Value
 						typeName := pair.Key
 						outSchema, err := conv.Convert(s.Shape)
-						writeToDiskHelper(t, struct{name string; typeName string; outSchema *JSONSchemaRAML}{name: tt.name, typeName: typeName, outSchema: outSchema})
+						writeToDiskHelper(t, struct {
+							name      string
+							typeName  string
+							outSchema *JSONSchemaRAML
+						}{name: tt.name, typeName: typeName, outSchema: outSchema})
 						require.NoError(t, err, "Failed to convert type shape in %s: %v", tt.path, err)
 						convertedCount++
 					}
 				case *DataType:
 					typeName := f.Shape.Name
 					outSchema, err := conv.Convert(f.Shape.Shape)
-					writeToDiskHelper(t, struct{name string; typeName string; outSchema *JSONSchemaRAML}{name: tt.name, typeName: typeName, outSchema: outSchema})
+					writeToDiskHelper(t, struct {
+						name      string
+						typeName  string
+						outSchema *JSONSchemaRAML
+					}{name: tt.name, typeName: typeName, outSchema: outSchema})
 					require.NoError(t, err, "Failed to convert data type shape in %s: %v", tt.path, err)
 					convertedCount++
 				}
@@ -393,7 +404,7 @@ func TestRAML_decodeDataType(t *testing.T) {
 		name    string
 		fields  fields
 		args    args
-		want    func(tt *testing.T, got *DataType)
+		want    func(tt *testing.T, got *DataTypeFragment)
 		wantErr bool
 	}{
 		{
@@ -405,7 +416,7 @@ func TestRAML_decodeDataType(t *testing.T) {
 				f:    &mockReadSeeker{P: []byte("#%RAML 1.0 DataType\ntype: string")},
 				path: "./fixtures/test.raml",
 			},
-			want: func(tt *testing.T, got *DataType) {
+			want: func(tt *testing.T, got *DataTypeFragment) {
 				require.NotNil(tt, got)
 				require.Equal(tt, "string", got.Shape.Type)
 			},
@@ -419,7 +430,7 @@ func TestRAML_decodeDataType(t *testing.T) {
 				path: "./fixtures/test.json",
 				f:    &mockReadSeeker{P: []byte("{\"type\": \"string\"}")},
 			},
-			want: func(tt *testing.T, got *DataType) {
+			want: func(tt *testing.T, got *DataTypeFragment) {
 				require.NotNil(tt, got)
 				require.Equal(tt, "json", got.Shape.Type)
 			},
@@ -435,7 +446,7 @@ func TestRAML_decodeDataType(t *testing.T) {
 				f:    &mockReadSeeker{P: []byte("#%RAML 1.0 DataType\nuses:\n  common: common.raml\ntype: common.A")},
 				path: "./fixtures/test.raml",
 			},
-			want: func(tt *testing.T, got *DataType) {
+			want: func(tt *testing.T, got *DataTypeFragment) {
 				require.NotNil(tt, got)
 				require.NotNil(tt, got.Uses)
 			},
@@ -609,7 +620,7 @@ func TestRAML_parseDataType(t *testing.T) {
 		name    string
 		fields  fields
 		args    args
-		want    func(tt *testing.T, got *DataType)
+		want    func(tt *testing.T, got *DataTypeFragment)
 		wantErr bool
 	}{
 		{
@@ -620,7 +631,7 @@ func TestRAML_parseDataType(t *testing.T) {
 			args: args{
 				path: "./fixtures/dtype.raml",
 			},
-			want: func(tt *testing.T, got *DataType) {
+			want: func(tt *testing.T, got *DataTypeFragment) {
 				require.NotNil(tt, got)
 				require.Equal(tt, "string", got.Shape.Type)
 			},
@@ -629,7 +640,7 @@ func TestRAML_parseDataType(t *testing.T) {
 			name: "positive: get fragment from cache",
 			fields: fields{
 				fragmentsCache: map[string]Fragment{
-					"test": &DataType{
+					"test": &DataTypeFragment{
 						Shape: &BaseShape{
 							Type: "string",
 						},
@@ -639,7 +650,7 @@ func TestRAML_parseDataType(t *testing.T) {
 			args: args{
 				path: "test",
 			},
-			want: func(tt *testing.T, got *DataType) {
+			want: func(tt *testing.T, got *DataTypeFragment) {
 				require.NotNil(tt, got)
 				require.Equal(tt, "string", got.Shape.Type)
 			},
