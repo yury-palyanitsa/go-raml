@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/acronis/go-stacktrace"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 	"gopkg.in/yaml.v3"
-
-	"github.com/acronis/go-stacktrace"
 )
 
 type FragmentKind int
@@ -18,7 +17,6 @@ const (
 	FragmentDataType
 	FragmentNamedExample
 )
-
 
 // CutReferenceName cuts a reference name into two parts: before and after the dot.
 func CutReferenceName(refName string) (string, string, bool) {
@@ -67,6 +65,7 @@ func (l *Library) GetReferenceType(refName string) (*BaseShape, error) {
 
 	var ref *BaseShape
 
+	//nolint:nestif // Contains simple checks.
 	if !found {
 		rr, ok := l.Types.Get(refName)
 		if !ok {
@@ -75,8 +74,8 @@ func (l *Library) GetReferenceType(refName string) (*BaseShape, error) {
 		ref = rr
 	} else {
 		// If reference name has dots, verify if it's a reference to a local type first
-		rr, ok := l.Types.Get(refName)
-		if !ok {
+		rr, hasType := l.Types.Get(refName)
+		if !hasType {
 			// If it's not, then check external references
 			lib, ok := l.Uses.Get(before)
 			if !ok {
@@ -100,6 +99,7 @@ func (l *Library) GetReferenceAnnotationType(refName string) (*BaseShape, error)
 
 	var ref *BaseShape
 
+	//nolint:nestif // Contains simple checks.
 	if !found {
 		rr, ok := l.AnnotationTypes.Get(refName)
 		if !ok {
@@ -108,8 +108,8 @@ func (l *Library) GetReferenceAnnotationType(refName string) (*BaseShape, error)
 		ref = rr
 	} else {
 		// If reference name has dots, verify if it's a reference to a local type first
-		rr, ok := l.AnnotationTypes.Get(refName)
-		if !ok {
+		rr, isType := l.AnnotationTypes.Get(refName)
+		if !isType {
 			// If it's not, then check external references
 			lib, ok := l.Uses.Get(before)
 			if !ok {

@@ -6,7 +6,7 @@ import (
 	"github.com/acronis/go-stacktrace"
 )
 
-func CutLast(s, sep string) (before, after string, found bool) {
+func CutLast(s, sep string) (string, string, bool) {
 	i := strings.LastIndex(s, sep)
 	if i < 0 {
 		return s, "", false
