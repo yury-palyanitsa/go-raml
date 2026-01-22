@@ -3,12 +3,10 @@ package raml
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
-
-	orderedmap "github.com/wk8/go-ordered-map/v2"
-	"gopkg.in/yaml.v3"
 
 	"github.com/acronis/go-stacktrace"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
+	"gopkg.in/yaml.v3"
 )
 
 type FragmentKind int
@@ -24,7 +22,7 @@ const (
 func CutReferenceName(refName string) (string, string, bool) {
 	// External ref - <fragment>.<identifier>
 	// Local ref - <identifier>
-	return strings.Cut(refName, ".")
+	return CutLast(refName, ".")
 }
 
 type LocationGetter interface {
@@ -67,6 +65,7 @@ func (l *Library) GetReferenceType(refName string) (*BaseShape, error) {
 
 	var ref *BaseShape
 
+	//nolint:nestif // Contains simple checks.
 	if !found {
 		rr, ok := l.Types.Get(refName)
 		if !ok {
@@ -74,13 +73,18 @@ func (l *Library) GetReferenceType(refName string) (*BaseShape, error) {
 		}
 		ref = rr
 	} else {
-		lib, ok := l.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.Types.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
+		// If reference name has dots, verify if it's a reference to a local type first
+		rr, hasType := l.Types.Get(refName)
+		if !hasType {
+			// If it's not, then check external references
+			lib, ok := l.Uses.Get(before)
+			if !ok {
+				return nil, fmt.Errorf("library \"%s\" not found", before)
+			}
+			rr, ok = lib.Link.Types.Get(after)
+			if !ok {
+				return nil, fmt.Errorf("reference \"%s\" not found", after)
+			}
 		}
 		ref = rr
 	}
@@ -95,6 +99,7 @@ func (l *Library) GetReferenceAnnotationType(refName string) (*BaseShape, error)
 
 	var ref *BaseShape
 
+	//nolint:nestif // Contains simple checks.
 	if !found {
 		rr, ok := l.AnnotationTypes.Get(refName)
 		if !ok {
@@ -102,13 +107,18 @@ func (l *Library) GetReferenceAnnotationType(refName string) (*BaseShape, error)
 		}
 		ref = rr
 	} else {
-		lib, ok := l.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.AnnotationTypes.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
+		// If reference name has dots, verify if it's a reference to a local type first
+		rr, isType := l.AnnotationTypes.Get(refName)
+		if !isType {
+			// If it's not, then check external references
+			lib, ok := l.Uses.Get(before)
+			if !ok {
+				return nil, fmt.Errorf("library \"%s\" not found", before)
+			}
+			rr, ok = lib.Link.AnnotationTypes.Get(after)
+			if !ok {
+				return nil, fmt.Errorf("reference \"%s\" not found", after)
+			}
 		}
 		ref = rr
 	}
@@ -276,6 +286,7 @@ func (dt *DataType) GetReferenceType(refName string) (*BaseShape, error) {
 	if !found {
 		return nil, fmt.Errorf("invalid reference %s", refName)
 	}
+	// NOTE: DataType does not define local types, only references to library types
 	lib, ok := dt.Uses.Get(before)
 	if !ok {
 		return nil, fmt.Errorf("library \"%s\" not found", before)
@@ -298,6 +309,7 @@ func (dt *DataType) GetReferenceAnnotationType(refName string) (*BaseShape, erro
 	if !found {
 		return nil, fmt.Errorf("invalid reference %s", refName)
 	}
+	// NOTE: DataType does not define local types, only references to library types
 	lib, ok := dt.Uses.Get(before)
 	if !ok {
 		return nil, fmt.Errorf("library \"%s\" not found", before)

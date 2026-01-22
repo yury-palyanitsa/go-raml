@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -13,70 +14,140 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func Test_ParseFromPathIntegration(t *testing.T) {
-	start := time.Now()
-	rml, err := ParseFromPath(`./fixtures/library.raml`, OptWithUnwrap(), OptWithValidate())
-	require.NoError(t, err)
-	elapsed := time.Since(start)
-	shapesAll := rml.GetShapes()
-	t.Logf("ParseFromPath took %d ms, location %s, total shapes %d", elapsed.Milliseconds(), rml.entryPoint.GetLocation(), len(shapesAll))
-
-	for _, base := range shapesAll {
-		shape := base.Shape
-		require.NotNil(t, shape)
-		_, ok := shape.(*UnknownShape)
-		require.False(t, ok)
+func Test_ParseFixturesIntegration(t *testing.T) {
+	// Define test cases for valid fixtures that should parse successfully
+	validTests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "library.raml",
+			path: "./fixtures/library.raml",
+		},
+		{
+			name: "dtype.raml",
+			path: "./fixtures/dtype.raml",
+		},
+		{
+			name: "named_example.raml",
+			path: "./fixtures/named_example.raml",
+		},
+		{
+			name: "other_lib.raml",
+			path: "./fixtures/other_lib.raml",
+		},
+		{
+			name: "recursive_type.raml",
+			path: "./fixtures/recursive_type.raml",
+		},
+		{
+			name: "common.raml",
+			path: "./fixtures/common.raml",
+		},
 	}
 
-	conv, err := NewJSONSchemaConverter(WithWrapper(JSONSchemaWrapper))
-	require.NoError(t, err)
-	for _, frag := range rml.fragmentsCache {
-		switch f := frag.(type) {
-		case *Library:
-			for pair := f.AnnotationTypes.Oldest(); pair != nil; pair = pair.Next() {
-				s := pair.Value
-				_, errConv := conv.Convert(s.Shape)
-				if errConv != nil {
-					t.Errorf("Convert shape: %s", errConv)
+	for _, tt := range validTests {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Now()
+			rml, err := ParseFromPath(tt.path, OptWithUnwrap(), OptWithValidate())
+			require.NoError(t, err, "Failed to parse %s", tt.path)
+			elapsed := time.Since(start)
+
+			require.NotNil(t, rml, "RAML should not be nil for %s", tt.path)
+			require.NotNil(t, rml.entryPoint, "Entry point should not be nil for %s", tt.path)
+
+			shapesAll := rml.GetShapes()
+			t.Logf("ParseFromPath(%s) took %d ms, location %s, total shapes %d",
+				tt.name, elapsed.Milliseconds(), rml.entryPoint.GetLocation(), len(shapesAll))
+
+			// Verify that no UnknownShape instances exist
+			for _, base := range shapesAll {
+				shape := base.Shape
+				require.NotNil(t, shape, "Shape should not be nil in %s", tt.path)
+				_, ok := shape.(*UnknownShape)
+				require.False(t, ok, "Found UnknownShape in %s, this indicates parsing issues", tt.path)
+			}
+
+			// Verify JSON Schema conversion
+			conv, err := NewJSONSchemaConverter(WithWrapper(JSONSchemaWrapper))
+			require.NoError(t, err, "Failed to create JSON Schema converter for %s", tt.path)
+
+			convertedCount := 0
+			for _, frag := range rml.fragmentsCache {
+				switch f := frag.(type) {
+				case *Library:
+					for pair := f.AnnotationTypes.Oldest(); pair != nil; pair = pair.Next() {
+						s := pair.Value
+						_, errConv := conv.Convert(s.Shape)
+						require.NoError(t, errConv, "Failed to convert annotation type shape in %s: %v", tt.path, errConv)
+						convertedCount++
+					}
+					for pair := f.Types.Oldest(); pair != nil; pair = pair.Next() {
+						s := pair.Value
+						_, errConv := conv.Convert(s.Shape)
+						require.NoError(t, errConv, "Failed to convert type shape in %s: %v", tt.path, errConv)
+						convertedCount++
+					}
+				case *DataType:
+					_, errConv := conv.Convert(f.Shape.Shape)
+					require.NoError(t, errConv, "Failed to convert data type shape in %s: %v", tt.path, errConv)
+					convertedCount++
 				}
-				// b, err := json.MarshalIndent(schema, "", "  ")
-				// if err != nil {
-				// 	t.Errorf("StackTrace marshalling schema: %s", err)
-				// }
-				// os.WriteFile(fmt.Sprintf("./out/%s_%s.json", s.Base().Name, s.Base().ID), b, 0644)
-				// fmt.Println(string(b))
 			}
-			for pair := f.Types.Oldest(); pair != nil; pair = pair.Next() {
-				s := pair.Value
-				_, errConv := conv.Convert(s.Shape)
-				if errConv != nil {
-					t.Errorf("Convert shape: %s", errConv)
-				}
-				// if err != nil {
-				// 	t.Errorf("StackTrace converting shape: %s", err)
-				// }
-				// b, err := json.MarshalIndent(schema, "", "  ")
-				// if err != nil {
-				// 	t.Errorf("StackTrace marshalling schema: %s", err)
-				// }
-				// os.WriteFile(fmt.Sprintf("./out/%s_%d.json", s.Name, s.ID), b, 0644)
-				// fmt.Println(string(b))
-			}
-		case *DataType:
-			_, errConv := conv.Convert(f.Shape.Shape)
-			if errConv != nil {
-				t.Errorf("Convert shape: %s", errConv)
-			}
-			// b, err := json.MarshalIndent(schema, "", "  ")
-			// if err != nil {
-			// 	t.Errorf("StackTrace marshalling schema: %s", err)
-			// }
-			// os.WriteFile(fmt.Sprintf("./out/%s_%s.json", s.Base().Name, s.Base().ID), b, 0644)
-			// fmt.Println(string(b))
-		}
+			t.Logf("Successfully converted %d shapes to JSON Schema for %s", convertedCount, tt.name)
+		})
 	}
 
-	printMemUsage(t)
+	// Define test cases for invalid fixtures that should fail parsing
+	invalidTests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "dtype_invalid_decode.raml",
+			path: "./fixtures/dtype_invalid_decode.raml",
+		},
+		{
+			name: "dtype_invalid_header.raml",
+			path: "./fixtures/dtype_invalid_header.raml",
+		},
+		{
+			name: "invalid_decode.raml",
+			path: "./fixtures/invalid_decode.raml",
+		},
+		{
+			name: "library_invalid.raml",
+			path: "./fixtures/library_invalid.raml",
+		},
+		{
+			name: "library_invalid_decode.raml",
+			path: "./fixtures/library_invalid_decode.raml",
+		},
+		{
+			name: "library_invalid_dot_import.raml",
+			path: "./fixtures/library_invalid_dot_import.raml",
+		},
+		{
+			name: "library_invalid_inheritance.raml",
+			path: "./fixtures/library_invalid_inheritance.raml",
+		},
+		{
+			name: "library_invalid_unwrap.raml",
+			path: "./fixtures/library_invalid_unwrap.raml",
+		},
+		{
+			name: "named_example_invalid_decode.raml",
+			path: "./fixtures/named_example_invalid_decode.raml",
+		},
+	}
+
+	for _, tt := range invalidTests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseFromPath(tt.path, OptWithUnwrap(), OptWithValidate())
+			require.Error(t, err, "Expected error when parsing %s", tt.path)
+			t.Logf("ParseFromPath(%s) correctly failed with error: %v", tt.name, err)
+		})
+	}
 }
 
 func printMemUsage(t *testing.T) {
@@ -1283,7 +1354,7 @@ func TestParseFromString(t *testing.T) {
 			args: args{
 				content:  "#%RAML 1.0 NamedExample\nexample: {\"name\": \"John\"}",
 				fileName: "test.raml",
-				baseDir:  "/tmp/fixtures",
+				baseDir:  mustAbs("./fixtures"),
 				opts:     []ParseOpt{OptWithUnwrap(), OptWithValidate()},
 			},
 			want: func(tt *testing.T, got *RAML) {
@@ -1311,4 +1382,12 @@ func TestParseFromString(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustAbs(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		panic(err)
+	}
+	return abs
 }

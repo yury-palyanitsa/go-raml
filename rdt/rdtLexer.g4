@@ -25,6 +25,6 @@ OBJECT_TYPE: 'object';
 UNION_TYPE: 'union';
 
 // Priority 2
-IDENTIFIER: ([0-9] | [a-z] | [A-Z] | '_' | '-')+;
+IDENTIFIER: ([0-9] | [a-z] | [A-Z] | '_' | '-' | '.')+;
 
 WS: [ \t] -> channel(HIDDEN);
