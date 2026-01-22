@@ -2771,14 +2771,14 @@ func TestBaseShape_decodeExamples(t *testing.T) {
 			fields: fields{
 				raml: &RAML{
 					fragmentsCache: map[string]Fragment{
-						"fixtures/example.raml": &NamedExample{},
+						"fixtures/named_example.raml": &NamedExample{},
 					},
 				},
 			},
 			args: args{
 				valueNode: &yaml.Node{
 					Kind:  yaml.ScalarNode,
-					Value: "fixtures/example.raml",
+					Value: "fixtures/named_example.raml",
 					Tag:   "!include",
 				},
 			},

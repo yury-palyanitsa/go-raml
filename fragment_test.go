@@ -22,13 +22,31 @@ func TestCutReferenceName(t *testing.T) {
 		want2 bool
 	}{
 		{
-			name: "positive case",
+			name: "normal identifier",
 			args: args{
 				refName: "fragment.identifier",
 			},
 			want:  "fragment",
 			want1: "identifier",
 			want2: true,
+		},
+		{
+			name: "ambiguous identifier",
+			args: args{
+				refName: "fragment.identifier.extra",
+			},
+			want:  "fragment.identifier",
+			want1: "extra",
+			want2: true,
+		},
+		{
+			name: "no dot",
+			args: args{
+				refName: "fragment",
+			},
+			want:  "fragment",
+			want1: "",
+			want2: false,
 		},
 	}
 	for _, tt := range tests {
