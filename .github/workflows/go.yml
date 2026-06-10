@@ -25,7 +25,7 @@ jobs:
 
     # - uses: golangci/golangci-lint-action@v9
     #   with:
-    #     version: v2.12.2
+    #     version: latest
     #     args: --timeout=5m -v
 
     - name: Test
@@ -52,7 +52,7 @@ jobs:
 
     # - uses: golangci/golangci-lint-action@v9
     #   with:
-    #     version: v2.12.2
+    #     version: latest
     #     working-directory: cmd/raml
     #     args: --timeout=5m -v
 
@@ -71,7 +71,7 @@ jobs:
 
     # - uses: golangci/golangci-lint-action@v9
     #   with:
-    #     version: v2.12.2
+    #     version: latest
     #     working-directory: cmd/raml-lsp
     #     args: --timeout=5m -v
 
