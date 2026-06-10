@@ -54,8 +54,8 @@ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsT
 github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
 github.com/tliron/commonlog v0.2.18 h1:F0zY09VDGTasPCpP9KvE8xqqVNMUfwMJQ0Xvo5Y6BRs=
 github.com/tliron/commonlog v0.2.18/go.mod h1:7f3OMSgVyGAFbRKwlvfUErnB6U75LgW8wa6NlWuswGg=
-github.com/tliron/glsp v0.2.0 h1:zhBD0wDVVqlpuPYtjmhIXI/8W5KQewPjaS4SYRevKYQ=
-github.com/tliron/glsp v0.2.0/go.mod h1:lQDXPfht/Um/FJLthIpGyXclyKq7uVUolignlAyK66Q=
+github.com/tliron/glsp v0.2.3-0.20250617204849-59d6e3155c81 h1:gQPs3aNGs4z0AWq4v1iyaA6eyoE0RvGihgDPw6REIhY=
+github.com/tliron/glsp v0.2.3-0.20250617204849-59d6e3155c81/go.mod h1:0mr4+bYwGddJfGuaxnUZBSxkshSzFOIyTmBRvfJDBo4=
 github.com/tliron/kutil v0.3.25 h1:oaPN6K0zsH3KcVnsocA3kAlfR0XYDzADob6xdjqe56k=
 github.com/tliron/kutil v0.3.25/go.mod h1:ZvOJuF6PTGvjfHmn2dFcgz+EDEzRQqQUztK+7djlXIw=
 github.com/wk8/go-ordered-map/v2 v2.1.8 h1:5h/BUHu93oj4gIdvHHHGsScSTMijfx5PeYkE/fJgbpc=
