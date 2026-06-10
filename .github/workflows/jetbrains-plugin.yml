@@ -25,5 +25,9 @@ jobs:
         distribution: 'temurin'
         java-version: '21'
 
+    - uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-read-only: false
+
     - name: Build
       run: make build-plugin-jetbrains
