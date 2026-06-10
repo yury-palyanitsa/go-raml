@@ -4,8 +4,6 @@ go 1.21
 
 toolchain go1.23.4
 
-replace github.com/acronis/go-stacktrace => ../go-stacktrace
-
 require (
 	github.com/acronis/go-stacktrace v0.7.0
 	github.com/antlr4-go/antlr/v4 v4.13.0
