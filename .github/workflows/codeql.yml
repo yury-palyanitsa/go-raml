@@ -44,7 +44,7 @@ jobs:
       matrix:
         include:
         - language: go
-          build-mode: autobuild
+          build-mode: manual
         - language: javascript-typescript
           build-mode: none
         - language: java-kotlin
@@ -74,6 +74,13 @@ jobs:
         # For more details on CodeQL's query packs, refer to: https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
         # queries: security-extended,security-and-quality
 
+    - if: matrix.language == 'go'
+      name: Build Go
+      run: |
+        go build ./...
+        (cd cmd/raml && go build ./...)
+        (cd cmd/raml-lsp && go build ./...)
+
     - if: matrix.language == 'java-kotlin'
       name: Set up Java
       uses: actions/setup-java@v5
@@ -87,6 +94,8 @@ jobs:
 
     - if: matrix.language == 'java-kotlin'
       name: Build Kotlin
+      env:
+        GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvmargs=-Xmx2g"
       run: |
         cd external/raml-lsp-jetbrains
         ./gradlew assemble --no-build-cache --no-daemon
