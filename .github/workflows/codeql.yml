@@ -89,7 +89,7 @@ jobs:
       name: Build Kotlin
       run: |
         cd external/raml-lsp-jetbrains
-        ./gradlew assemble
+        ./gradlew assemble --no-build-cache --no-daemon
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
