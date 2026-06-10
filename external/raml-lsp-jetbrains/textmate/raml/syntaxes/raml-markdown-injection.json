@@ -1,0 +1,42 @@
+{
+    "information_for_contributors": [
+        "Injects Markdown highlighting into RAML 'description' and 'content' fields.",
+        "Works in both VS Code (via injectTo in package.json) and JetBrains IDEs",
+        "(via injectionSelector in this file, read by the TextMate engine)."
+    ],
+    "scopeName": "raml.injection.description.markdown",
+    "injectionSelector": "L:source.raml",
+    "patterns": [
+        { "include": "#block-description" },
+        { "include": "#inline-description" }
+    ],
+    "repository": {
+        "block-description": {
+            "comment": "Highlight block scalar values (| or >) of description/content keys as Markdown",
+            "begin": "^([ \\t]*)((?:description|content))([ \\t]*:[ \\t]*)((?:\\||>)[-+]?)[ \\t]*(?:#[^\\n]*)?$",
+            "beginCaptures": {
+                "2": { "name": "entity.name.tag.yaml" },
+                "3": { "name": "punctuation.separator.key-value.mapping.yaml" },
+                "4": { "name": "keyword.control.flow.block-scalar.yaml" }
+            },
+            "end": "^(?!\\1[ \\t]|[ \\t]*$)",
+            "contentName": "meta.embedded.block.markdown",
+            "patterns": [
+                { "include": "text.html.markdown" }
+            ]
+        },
+        "inline-description": {
+            "comment": "Highlight inline plain scalar values of description/content keys as Markdown",
+            "begin": "^([ \\t]*)((?:description|content))([ \\t]*:[ \\t]+)(?![|>\"'\\n])",
+            "beginCaptures": {
+                "2": { "name": "entity.name.tag.yaml" },
+                "3": { "name": "punctuation.separator.key-value.mapping.yaml" }
+            },
+            "end": "[ \\t]*(?=#|$)",
+            "contentName": "meta.embedded.inline.markdown",
+            "patterns": [
+                { "include": "text.html.markdown" }
+            ]
+        }
+    }
+}

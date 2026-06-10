@@ -69,6 +69,54 @@ func mainFn() int {
 			},
 		}
 
+		cmd.Flags().StringVarP(&opts.WorkspaceRoot, "workspace-root", "w", "",
+			"restrict file loading to this directory (absolute path); "+
+				"any !include or uses: outside the root is rejected")
+		cmd.Flags().BoolVar(&opts.NoWorkspaceGuard, "no-workspace-guard", false,
+			"disable the workspace file-loading restriction; allows includes to resolve to any path")
+		cmd.Flags().BoolVar(&opts.AllowRemote, "remote", false,
+			"enable resolution of HTTP/HTTPS remote fragments (!include https://...)")
+
+		return cmd
+	}()
+
+	cmdConvert := func() *cobra.Command {
+		opts := ConvertOptions{}
+		cmd := &cobra.Command{
+			Use:   "convert [flags] <file.raml>...",
+			Short: "convert RAML files to another format",
+			Long: `Convert one or more API definition files.
+
+Currently supported output formats:
+  oas3         OpenAPI Specification 3.0.3 (JSON)  [input: RAML 1.0]
+  jsonschema   JSON Schema draft-07 (one file per type, or --type for a single type)  [input: RAML 1.0]
+  raml         RAML 1.0 DataType or Library  [input: JSON Schema]
+
+When --output is a file path and multiple inputs are given, --output is treated
+as a directory; each result is written as:
+  oas3       → <basename>.openapi.json
+  jsonschema → <TypeName>.schema.json
+  raml       → <basename>.raml`,
+			Args: cobra.MinimumNArgs(1),
+			RunE: func(_ *cobra.Command, args []string) error {
+				return InitLoggingAndRun(ctx, verbosity, NewConvertCmd(opts, args))
+			},
+		}
+
+		cmd.Flags().StringVarP(&opts.Format, "format", "f", "oas3",
+			`output format: "oas3", "jsonschema", "raml" (JSON Schema → RAML 1.0)`)
+		cmd.Flags().StringVarP(&opts.Output, "output", "o", "",
+			`output file or directory (default: stdout; use "-" for stdout explicitly)`)
+		cmd.Flags().StringVarP(&opts.TypeName, "type", "t", "",
+			`(jsonschema) convert only the named type instead of all types`)
+		cmd.Flags().StringVarP(&opts.WorkspaceRoot, "workspace-root", "w", "",
+			"restrict file loading to this directory (absolute path); "+
+				"any !include or uses: outside the root is rejected")
+		cmd.Flags().BoolVar(&opts.NoWorkspaceGuard, "no-workspace-guard", false,
+			"disable the workspace file-loading restriction; allows includes to resolve to any path")
+		cmd.Flags().BoolVar(&opts.AllowRemote, "remote", false,
+			"enable resolution of HTTP/HTTPS remote fragments (!include https://...)")
+
 		return cmd
 	}()
 
@@ -89,6 +137,7 @@ func mainFn() int {
 
 		cmd.AddCommand(
 			cmdValidate,
+			cmdConvert,
 		)
 		return cmd
 	}()

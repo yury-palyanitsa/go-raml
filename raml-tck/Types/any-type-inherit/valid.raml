@@ -1,0 +1,14 @@
+#%RAML 1.0
+
+title: test
+
+types:
+  AnyObjType:
+    type: object
+    properties:
+      a: any
+
+  IntegerType:
+    type: AnyObjType
+    properties:
+      a: integer

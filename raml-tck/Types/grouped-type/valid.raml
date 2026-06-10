@@ -1,0 +1,9 @@
+#%RAML 1.0
+title: Grouped Type API
+
+types:
+  IntegerType:
+    type: integer
+
+  GroupedType:
+    type: (IntegerType | string) | integer

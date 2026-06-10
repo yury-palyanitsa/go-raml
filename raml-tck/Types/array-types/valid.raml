@@ -1,0 +1,18 @@
+#%RAML 1.0
+title: Array Types API
+
+types:
+  ArrayTypeNoItems:
+    displayName: Array type no items type
+    type: array
+
+  ArrayShape:
+    displayName: Array type
+    type: array
+    items:
+      type: string
+
+  ArrayShapeInline: string[]
+
+  ArrayShapeInlineType:
+    type: string[]

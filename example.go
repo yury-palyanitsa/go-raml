@@ -19,24 +19,39 @@ var ErrValueKeyNotFound = errors.New("value key not found")
 func (ex *Example) decode(node *yaml.Node, valueNode *yaml.Node, location string) error {
 	switch node.Value {
 	case FacetStrict:
-		if err := valueNode.Decode(&ex.Strict); err != nil {
-			return StacktraceNewWrapped("decode strict", err, location, WithNodePosition(valueNode))
+		sn, err := MakeScalarFacetYAML[bool](ex.raml, node, valueNode, location)
+		if err != nil {
+			return StacktraceNewWrapped("make scalar node", err, location, WithNodePosition(valueNode))
 		}
+		ex.Strict = sn
 	case FacetDisplayName:
-		if err := valueNode.Decode(&ex.DisplayName); err != nil {
-			return StacktraceNewWrapped("decode displayName", err, location, WithNodePosition(valueNode))
+		sn, err := MakeScalarFacetYAML[string](ex.raml, node, valueNode, location)
+		if err != nil {
+			return StacktraceNewWrapped("make scalar node", err, location, WithNodePosition(valueNode))
 		}
+		ex.DisplayName = sn
 	case FacetDescription:
-		if err := valueNode.Decode(&ex.Description); err != nil {
-			return StacktraceNewWrapped("decode description", err, location, WithNodePosition(valueNode))
+		sn, err := MakeScalarFacetYAML[string](ex.raml, node, valueNode, location)
+		if err != nil {
+			return StacktraceNewWrapped("make scalar node", err, location, WithNodePosition(valueNode))
 		}
+		ex.Description = sn
+	case FacetValue:
+		n, err := ex.raml.makeRootNode(node, valueNode, location)
+		if err != nil {
+			return StacktraceNewWrapped("make node", err, location, WithNodePosition(valueNode))
+		}
+		ex.Data = n
 	default:
 		if IsCustomDomainExtensionNode(node.Value) {
-			deName, de, err := ex.raml.unmarshalCustomDomainExtension(location, node, valueNode)
+			de, err := ex.raml.unmarshalCustomDomainExtension(location, node, valueNode)
 			if err != nil {
 				return StacktraceNewWrapped("unmarshal custom domain extension", err, location, WithNodePosition(valueNode))
 			}
-			ex.CustomDomainProperties.Set(deName, de)
+			ex.CustomDomainProperties.Set(de.Name, de)
+		} else {
+			return StacktraceNew("unknown field", location, WithNodePosition(node),
+				stacktrace.WithInfo("field", node.Value))
 		}
 	}
 	return nil
@@ -66,21 +81,17 @@ func (ex *Example) fill(location string, value *yaml.Node) error {
 			return fmt.Errorf("decode example: %w", err)
 		}
 	}
-	n, err := ex.raml.makeRootNode(valueKey, location)
-	if err != nil {
-		return StacktraceNewWrapped("make node", err, location, WithNodePosition(valueKey))
-	}
-	ex.Data = n
 	return nil
 }
 
 // makeExample creates an example from the given value node
 func (r *RAML) makeExample(value *yaml.Node, name string, location string) (*Example, error) {
 	ex := &Example{
+		ID:                     r.generateSequenceID(),
 		Name:                   name,
-		Strict:                 true,
 		Location:               location,
-		Position:               stacktrace.Position{Line: value.Line, Column: value.Column},
+		KeyPos:                 NewNodePosition(value),
+		ValuePos:               NewNodePosition(value),
 		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
 		raml:                   r,
 	}
@@ -96,7 +107,7 @@ func (r *RAML) makeExample(value *yaml.Node, name string, location string) (*Exa
 		}
 	}
 	// In all other cases, the example is considered as a value node
-	n, err := r.makeRootNode(value, location)
+	n, err := r.makeRootNode(nil, value, location)
 	if err != nil {
 		return nil, StacktraceNewWrapped("make node", err, location, WithNodePosition(value))
 	}
@@ -106,16 +117,17 @@ func (r *RAML) makeExample(value *yaml.Node, name string, location string) (*Exa
 
 // Example represents an example of a shape
 type Example struct {
-	ID          string
+	ID          int64
 	Name        string
-	DisplayName string
-	Description string
-	Data        *Node
+	DisplayName *ScalarFacet[string]
+	Description *ScalarFacet[string]
+	Strict      *ScalarFacet[bool]
+	Data        *DataNode
 
-	Strict                 bool
 	CustomDomainProperties *orderedmap.OrderedMap[string, *DomainExtension]
 
 	Location string
-	stacktrace.Position
-	raml *RAML
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
+	raml     *RAML
 }

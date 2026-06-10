@@ -1,0 +1,20 @@
+{
+    "name": "raml",
+    "version": "0.1.0",
+    "contributes": {
+        "languages": [
+            {
+                "id": "raml",
+                "aliases": ["RAML", "raml"],
+                "extensions": [".raml"]
+            }
+        ],
+        "grammars": [
+            {
+                "language": "raml",
+                "scopeName": "source.raml",
+                "path": "./syntaxes/raml.tmLanguage.json"
+            }
+        ]
+    }
+}

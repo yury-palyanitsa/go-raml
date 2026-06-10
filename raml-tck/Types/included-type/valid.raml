@@ -1,0 +1,15 @@
+#%RAML 1.0
+title: Included Type API
+
+types:
+  IncludedTypeInline: !include ./dtype.raml
+
+  IncludedType:
+    type: !include ./dtype.raml
+
+  JSONTypeInline: !include ./dtype.json
+
+  JSONTypeInlineString: "{}"
+
+  JSONType:
+    type: "{}"

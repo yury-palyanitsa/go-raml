@@ -1,8 +1,6 @@
 package raml
 
 import (
-	"container/list"
-	"context"
 	"regexp"
 	"testing"
 
@@ -11,485 +9,289 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// propEntry is a key+Property pair used by newPropsMap.
+type propEntry struct {
+	key  string
+	prop Property
+}
+
+// newPropsMap builds an ordered Property map from key/Property pairs.
+func newPropsMap(entries ...propEntry) *orderedmap.OrderedMap[string, Property] {
+	m := orderedmap.New[string, Property](len(entries))
+	for _, e := range entries {
+		m.Set(e.key, e.prop)
+	}
+	return m
+}
+
+// patternPropEntry is a key+PatternProperty pair used by newPatternPropsMap.
+type patternPropEntry struct {
+	key  string
+	prop PatternProperty
+}
+
+// newPatternPropsMap builds an ordered PatternProperty map.
+func newPatternPropsMap(entries ...patternPropEntry) *orderedmap.OrderedMap[string, PatternProperty] {
+	m := orderedmap.New[string, PatternProperty](len(entries))
+	for _, e := range entries {
+		m.Set(e.key, e.prop)
+	}
+	return m
+}
+
+// stringProp is a convenience factory for a required string Property.
+func stringProp(name string, id int64) Property {
+	return Property{
+		Name:     name,
+		Base:     NewLinkedBase(&StringShape{}, &BaseShape{ID: id}),
+		Required: true,
+	}
+}
+
+// patternProp is a convenience factory for an optional pattern-based property.
+func patternProp(rawPattern string, id int64) patternPropEntry {
+	re := regexp.MustCompile(rawPattern)
+	return patternPropEntry{
+		key: "/" + rawPattern + "/",
+		prop: PatternProperty{
+			Pattern: re,
+			Base:    NewLinkedBase(&StringShape{}, &BaseShape{ID: id}),
+		},
+	}
+}
+
+// TestArrayShape_clone verifies that clone produces an independent *ArrayShape.
 func TestArrayShape_clone(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
-	}
-	type args struct {
-		base      *BaseShape
-		clonedMap map[int64]*BaseShape
-	}
+	itemBase := NewLinkedBase(&StringShape{}, &BaseShape{ID: 2})
+
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   func(got Shape) (string, bool)
+		name      string
+		src       *ArrayShape
+		cloneBase *BaseShape
+		wantItems bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape:   &BaseShape{},
-				ArrayFacets: ArrayFacets{},
-			},
-			args: args{
-				base:      &BaseShape{},
-				clonedMap: make(map[int64]*BaseShape),
-			},
-			want: func(got Shape) (string, bool) {
-				if _, ok := got.(*ArrayShape); !ok {
-					return "expected to get *ArrayShape", false
-				}
-				return "", true
+			name:      "no items",
+			src:       NewTestShape(&ArrayShape{}, 1),
+			cloneBase: &BaseShape{ID: 10},
+		},
+		{
+			name: "already in clonedMap uses cached base",
+			src: func() *ArrayShape {
+				s := NewTestShape(&ArrayShape{}, 1)
+				// The base is already in the map => clone reuses it
+				return s
+			}(),
+			cloneBase: &BaseShape{
+				ID: 1,
+				Shape: &ArrayShape{
+					BaseShape:   &BaseShape{ID: 1},
+					ArrayFacets: ArrayFacets{},
+				},
 			},
 		},
 		{
-			name: "positive case with history",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ArrayFacets: ArrayFacets{},
+			name: "with items clones items recursively",
+			src: &ArrayShape{
+				BaseShape:   &BaseShape{ID: 1},
+				ArrayFacets: ArrayFacets{Items: itemBase},
 			},
-			args: args{
-				base: &BaseShape{
-					ID: 1,
-					Shape: &ArrayShape{
-						BaseShape:   &BaseShape{ID: 1},
-						ArrayFacets: ArrayFacets{},
-					},
-				},
-				clonedMap: make(map[int64]*BaseShape),
-			},
-			want: func(got Shape) (string, bool) {
-				if _, ok := got.(*ArrayShape); !ok {
-					return "expected to get *ArrayShape", false
-				}
-				return "", true
-			},
-		},
-		{
-			name: "positive case with items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 1,
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-				},
-			},
-			args: args{
-				clonedMap: make(map[int64]*BaseShape),
-			},
-			want: func(got Shape) (string, bool) {
-				if _, ok := got.(*ArrayShape); !ok {
-					return "expected to get *ArrayShape", false
-				}
-				return "", true
-			},
+			cloneBase: &BaseShape{ID: 10},
+			wantItems: true,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
+			got := tt.src.clone(tt.cloneBase, make(map[int64]*BaseShape))
+			arr, ok := got.(*ArrayShape)
+			if !ok {
+				t.Fatalf("clone() type = %T, want *ArrayShape", got)
 			}
-			got := s.clone(tt.args.base, tt.args.clonedMap)
-			if msg, ok := tt.want(got); !ok {
-				t.Errorf("Case hasn't been passed: %s", msg)
+			if tt.wantItems && arr.Items == nil {
+				t.Error("clone() Items is nil, want non-nil")
+			}
+			if !tt.wantItems && arr.Items != nil {
+				t.Errorf("clone() Items = %v, want nil", arr.Items)
 			}
 		})
 	}
 }
 
+// TestArrayShape_Validate verifies the validate method on array values.
 func TestArrayShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
-	}
-	type args struct {
-		v       interface{}
-		ctxPath string
-	}
+	itemBase := NewLinkedBase(&StringShape{}, &BaseShape{ID: 2})
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		facets  ArrayFacets
+		v       any
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-					UniqueItems: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "valid array with unique string items",
+			facets: ArrayFacets{
+				Items:       itemBase,
+				UniqueItems: scalarFacetOf(true),
 			},
-			args: args{
-				v:       []interface{}{"test"},
-				ctxPath: "",
-			},
+			v: []any{"a"},
 		},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v: "test",
-			},
+			name:    "non-array value rejected",
+			v:       "not-an-array",
 			wantErr: true,
 		},
 		{
-			name: "array must have at least two items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					MinItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "fewer items than minItems",
+			facets: ArrayFacets{
+				MinItems: scalarFacetOf(uint64(2)),
 			},
-			args: args{
-				v: []interface{}{"test"},
-			},
+			v:       []any{"only-one"},
 			wantErr: true,
 		},
 		{
-			name: "array must have no more than two items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					MaxItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "more items than maxItems",
+			facets: ArrayFacets{
+				MaxItems: scalarFacetOf(uint64(2)),
 			},
-			args: args{
-				v: []interface{}{"test", "test", "test"},
-			},
+			v:       []any{"a", "b", "c"},
 			wantErr: true,
 		},
 		{
-			name: "invalid array item",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-				},
+			name: "item fails type constraint",
+			facets: ArrayFacets{
+				Items: itemBase,
 			},
-			args: args{
-				v:       []interface{}{1},
-				ctxPath: "",
-			},
+			v:       []any{42},
 			wantErr: true,
 		},
 		{
-			name: "array must have unique items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-					UniqueItems: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "duplicate items when uniqueItems=true",
+			facets: ArrayFacets{
+				Items:       itemBase,
+				UniqueItems: scalarFacetOf(true),
 			},
-			args: args{
-				v:       []interface{}{"test", "test"},
-				ctxPath: "",
-			},
+			v:       []any{"dup", "dup"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
+				BaseShape:   &BaseShape{},
+				ArrayFacets: tt.facets,
 			}
-			if err := s.validate(tt.args.v, tt.args.ctxPath); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			if err := s.validate(tt.v, ""); (err != nil) != tt.wantErr {
+				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestArrayShape_Inherit checks that array shape constraints are merged correctly.
 func TestArrayShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
-	}
-	type args struct {
-		source Shape
-	}
+	stringItemBase := NewLinkedBase(&StringShape{}, &BaseShape{ID: 1})
+	numberItemBase := NewLinkedBase(&NumberShape{}, &BaseShape{ID: 2})
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  ArrayFacets
+		source  ArrayFacets
 		wantErr bool
+		check   func(*ArrayShape)
 	}{
 		{
-			name: "positive case without facets",
-			fields: fields{
-				BaseShape:   &BaseShape{},
-				ArrayFacets: ArrayFacets{},
+			name:   "all facets inherited from source when target is empty",
+			target: ArrayFacets{},
+			source: ArrayFacets{
+				Items:       stringItemBase,
+				MinItems:    scalarFacetOf(uint64(2)),
+				MaxItems:    scalarFacetOf(uint64(4)),
+				UniqueItems: scalarFacetOf(true),
 			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{
-						ID: 1,
-					},
-					ArrayFacets: ArrayFacets{
-						Items: &BaseShape{
-							ID: 1,
-							Shape: &StringShape{
-								BaseShape: &BaseShape{ID: 2},
-							},
-						},
-						MinItems: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-						MaxItems: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-						UniqueItems: func() *bool {
-							b := true
-							return &b
-						}(),
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				arr, ok := got.(*ArrayShape)
-				if !ok {
-					return "expected to get *ArrayShape", false
+			check: func(s *ArrayShape) {
+				if s.MinItems == nil || s.MinItems.Value != 2 {
+					t.Error("MinItems not inherited")
 				}
-				if arr.MinItems == nil || *arr.MinItems != 2 {
-					return "MinItems hasn't been inherited", false
+				if s.MaxItems == nil || s.MaxItems.Value != 4 {
+					t.Error("MaxItems not inherited")
 				}
-				if arr.MaxItems == nil || *arr.MaxItems != 2 {
-					return "MaxItems hasn't been inherited", false
+				if s.UniqueItems == nil || !s.UniqueItems.Value {
+					t.Error("UniqueItems not inherited")
 				}
-				if arr.UniqueItems == nil || *arr.UniqueItems != true {
-					return "UniqueItems hasn't been inherited", false
+				if s.Items == nil {
+					t.Error("Items not inherited")
 				}
-				if arr.Items == nil || arr.Items.ID != 1 {
-					return "Items hasn't been inherited", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "positive case with facets",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 1,
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-					MinItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-					MaxItems: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					UniqueItems: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "target facets take precedence over source",
+			target: ArrayFacets{
+				Items:       stringItemBase,
+				MinItems:    scalarFacetOf(uint64(2)),
+				MaxItems:    scalarFacetOf(uint64(4)),
+				UniqueItems: scalarFacetOf(true),
 			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{
-						ID: 1,
-					},
-					ArrayFacets: ArrayFacets{
-						Items: &BaseShape{
-							ID: 1,
-							Shape: &StringShape{
-								BaseShape: &BaseShape{ID: 2},
-							},
-						},
-						MinItems: func() *uint64 {
-							i := uint64(1)
-							return &i
-						}(),
-						MaxItems: func() *uint64 {
-							i := uint64(6)
-							return &i
-						}(),
-						UniqueItems: func() *bool {
-							b := false
-							return &b
-						}(),
-					},
-				},
+			source: ArrayFacets{
+				Items:       NewLinkedBase(&StringShape{}, &BaseShape{ID: 3}),
+				MinItems:    scalarFacetOf(uint64(1)),
+				MaxItems:    scalarFacetOf(uint64(6)),
+				UniqueItems: scalarFacetOf(false),
 			},
-			want: func(got Shape) (string, bool) {
-				arr, ok := got.(*ArrayShape)
-				if !ok {
-					return "expected to get *ArrayShape", false
+			check: func(s *ArrayShape) {
+				if s.MinItems == nil || s.MinItems.Value != 2 {
+					t.Error("MinItems should keep target value 2")
 				}
-				if arr.MinItems == nil || *arr.MinItems != 2 {
-					return "MinItems hasn't been inherited", false
+				if s.MaxItems == nil || s.MaxItems.Value != 4 {
+					t.Error("MaxItems should keep target value 4")
 				}
-				if arr.MaxItems == nil || *arr.MaxItems != 4 {
-					return "MaxItems hasn't been inherited", false
+				if s.UniqueItems == nil || !s.UniqueItems.Value {
+					t.Error("UniqueItems should keep target value true")
 				}
-				if arr.UniqueItems == nil || *arr.UniqueItems != true {
-					return "UniqueItems hasn't been inherited", false
-				}
-				if arr.Items == nil || arr.Items.ID != 1 {
-					return "Items hasn't been inherited", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case different type",
-			fields: fields{
-				BaseShape:   &BaseShape{},
-				ArrayFacets: ArrayFacets{},
+			name:    "type mismatch returns error",
+			target:  ArrayFacets{},
+			wantErr: true,
+		},
+		{
+			name: "incompatible items types returns error",
+			target: ArrayFacets{
+				Items: stringItemBase,
 			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 1,
-					},
-				},
+			source: ArrayFacets{
+				Items: numberItemBase,
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative case different items type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 1,
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-				},
+			name: "target minItems looser than source — constraint violation",
+			target: ArrayFacets{
+				MinItems: scalarFacetOf(uint64(1)),
 			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{},
-					ArrayFacets: ArrayFacets{
-						Items: &BaseShape{
-							ID: 1,
-							Shape: &NumberShape{
-								BaseShape: &BaseShape{ID: 2},
-							},
-						},
-					},
-				},
+			source: ArrayFacets{
+				MinItems: scalarFacetOf(uint64(2)),
 			},
 			wantErr: true,
 		},
 		{
-			name: "minItems constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					MinItems: func() *uint64 {
-						i := uint64(1)
-						return &i
-					}(),
-				},
+			name: "target maxItems tighter than source — constraint violation",
+			target: ArrayFacets{
+				MaxItems: scalarFacetOf(uint64(2)),
 			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{},
-					ArrayFacets: ArrayFacets{
-						MinItems: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-					},
-				},
+			source: ArrayFacets{
+				MaxItems: scalarFacetOf(uint64(1)),
 			},
 			wantErr: true,
 		},
 		{
-			name: "maxItems constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					MaxItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "target allows duplicates but source requires uniqueness — violation",
+			target: ArrayFacets{
+				UniqueItems: scalarFacetOf(false),
 			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{},
-					ArrayFacets: ArrayFacets{
-						MaxItems: func() *uint64 {
-							i := uint64(1)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "uniqueItems constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					UniqueItems: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
-			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{},
-					ArrayFacets: ArrayFacets{
-						UniqueItems: func() *bool {
-							b := true
-							return &b
-						}(),
-					},
-				},
+			source: ArrayFacets{
+				UniqueItems: scalarFacetOf(true),
 			},
 			wantErr: true,
 		},
@@ -497,98 +299,69 @@ func TestArrayShape_Inherit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
+				BaseShape:   &BaseShape{},
+				ArrayFacets: tt.target,
 			}
-			got, err := s.inherit(tt.args.source)
+			var src Shape
+			if tt.wantErr && tt.source == (ArrayFacets{}) && tt.name == "type mismatch returns error" {
+				src = &StringShape{BaseShape: &BaseShape{ID: 99}}
+			} else {
+				src = &ArrayShape{
+					BaseShape:   &BaseShape{ID: 99},
+					ArrayFacets: tt.source,
+				}
+			}
+			got, err := s.inherit(src)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
+			if !tt.wantErr && tt.check != nil {
+				arr, ok := got.(*ArrayShape)
+				if !ok {
+					t.Fatalf("inherit() type = %T, want *ArrayShape", got)
 				}
+				tt.check(arr)
 			}
 		})
 	}
 }
 
+// TestArrayShape_Check verifies structural self-consistency of ArrayFacets.
 func TestArrayShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		facets  ArrayFacets
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 1,
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-						},
-					},
-					MinItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-					MaxItems: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					UniqueItems: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "valid array with all facets set",
+			facets: ArrayFacets{
+				Items:       NewLinkedBase(&StringShape{}, &BaseShape{ID: 1}),
+				MinItems:    scalarFacetOf(uint64(2)),
+				MaxItems:    scalarFacetOf(uint64(4)),
+				UniqueItems: scalarFacetOf(true),
 			},
 		},
 		{
-			name: "invalid min and max items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					MinItems: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					MaxItems: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "minItems greater than maxItems",
+			facets: ArrayFacets{
+				MinItems: scalarFacetOf(uint64(4)),
+				MaxItems: scalarFacetOf(uint64(2)),
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid items",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 1,
-						Shape: &StringShape{
-							BaseShape: &BaseShape{ID: 2},
-							StringFacets: StringFacets{
-								LengthFacets: LengthFacets{
-									MinLength: func() *uint64 {
-										i := uint64(4)
-										return &i
-									}(),
-									MaxLength: func() *uint64 {
-										i := uint64(2)
-										return &i
-									}(),
-								},
-							},
-						},
+			name: "invalid nested items shape",
+			facets: ArrayFacets{
+				Items: &BaseShape{
+					ID: 1,
+					Shape: &StringShape{
+						StringFacets: StringFacets{LengthFacets: LengthFacets{
+							MinLength: scalarFacetOf(uint64(4)),
+							MaxLength: scalarFacetOf(uint64(2)),
+						}},
+						BaseShape: &BaseShape{},
 					},
 				},
 			},
@@ -598,8 +371,8 @@ func TestArrayShape_Check(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
+				BaseShape:   &BaseShape{},
+				ArrayFacets: tt.facets,
 			}
 			if err := s.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
@@ -608,1149 +381,443 @@ func TestArrayShape_Check(t *testing.T) {
 	}
 }
 
+// TestArrayShape_unmarshalYAMLNodes verifies YAML node parsing for ArrayShape facets.
+// Each sub-test uses a fresh RAML/BaseShape to avoid cross-test contamination.
 func TestArrayShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
+	mappingNode := func(kv ...*yaml.Node) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Content: kv}
 	}
-	type args struct {
-		v []*yaml.Node
+	scalar := func(val, tag string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: tag}
 	}
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "2",
-						Tag:   "!!int",
-					},
-					{
-						Value: "maxItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "4",
-						Tag:   "!!int",
-					},
-					{
-						Value: "uniqueItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "true",
-						Tag:   "!!bool",
-					},
-					{
-						Value: "items",
-					},
-					{
-						Kind: yaml.MappingNode,
-						Content: []*yaml.Node{
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "type",
-								Tag:   "!!str",
-							},
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "string",
-								Tag:   "!!str",
-							},
-						},
-					},
-					{
-						Value: "custom",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "value",
-						Tag:   "!!str",
-					},
-				},
+			name: "all facets: minItems, maxItems, uniqueItems, items, custom",
+			nodes: []*yaml.Node{
+				{Value: "minItems"}, scalar("2", "!!int"),
+				{Value: "maxItems"}, scalar("4", "!!int"),
+				{Value: "uniqueItems"}, scalar("true", "!!bool"),
+				{Value: "items"}, mappingNode(scalar("type", "!!str"), scalar("string", "!!str")),
+				{Value: "custom"}, scalar("value", "!!str"),
 			},
 		},
 		{
-			name: "invalid odd",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minItems",
-					},
-				},
+			name: "invalid minItems type",
+			nodes: []*yaml.Node{
+				{Value: "minItems"}, scalar("string", "!!str"),
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid minItems",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
+			name: "invalid maxItems type",
+			nodes: []*yaml.Node{
+				{Value: "maxItems"}, scalar("string", "!!str"),
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid maxItems",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "maxItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
+			name: "invalid uniqueItems type",
+			nodes: []*yaml.Node{
+				{Value: "uniqueItems"}, scalar("string", "!!str"),
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid uniqueItems",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "uniqueItems",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
+			name: "invalid items node",
+			nodes: []*yaml.Node{
+				{Value: "items"}, mappingNode(
+					scalar("type", "!!int"),
+					scalar("string", "!!int"),
+				),
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid items",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "items",
-					},
-					{
-						Kind: yaml.MappingNode,
-						Content: []*yaml.Node{
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "type",
-								Tag:   "!!int",
-							},
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "string",
-								Tag:   "!!int",
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid custom facet",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "value",
-						Tag:   "!!int",
-					},
-				},
+			name: "invalid custom facet tag",
+			nodes: []*yaml.Node{
+				{Value: "custom"}, scalar("value", "!!int"),
 			},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			r := makeTestRAML(t)
+			base := makeTestBase(t, r, "s")
+			s := &ArrayShape{BaseShape: base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestObjectShape_unmarshalPatternProperties verifies parsing pattern property YAML nodes.
 func TestObjectShape_unmarshalPatternProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		nodeName            string
-		propertyName        string
-		data                *yaml.Node
-		hasImplicitOptional bool
-	}
+	scalar := func(val, tag string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: tag} }
+
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		name         string
+		nodeName     string
+		propertyName string
+		data         *yaml.Node
+		wantErr      bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				nodeName:     "patternProperties",
-				propertyName: "pattern",
-				data: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "type",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "string",
-							Tag:   "!!str",
-						},
-					},
-				},
-			},
-			wantErr: false,
+			name:         "valid pattern property with type",
+			nodeName:     "patternProperties",
+			propertyName: "/^name.*/",
+			data: &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				scalar("type", "!!str"), scalar("string", "!!str"),
+			}},
 		},
 		{
-			name: "make pattern property error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				nodeName:     "patternProperties",
-				propertyName: "pattern",
-				data: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "required",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "true",
-							Tag:   "!!bool",
-						},
-					},
-				},
-			},
+			name:         "required facet not allowed on pattern property",
+			nodeName:     "patternProperties",
+			propertyName: "/^name.*/",
+			data: &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				scalar("required", "!!str"), scalar("true", "!!bool"),
+			}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
-			if err := s.unmarshalPatternProperties(tt.args.nodeName, tt.args.propertyName, tt.args.data, tt.args.hasImplicitOptional); (err != nil) != tt.wantErr {
+			r := makeTestRAML(t)
+			base := makeTestBase(t, r, "o")
+			s := &ObjectShape{BaseShape: base}
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: tt.nodeName}
+			err := s.unmarshalPatternProperties(tt.propertyName, keyNode, tt.data, false)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalPatternProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestObjectShape_unmarshalProperty verifies property-name parsing including pattern detection.
 func TestObjectShape_unmarshalProperty(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
+	scalar := func(val, tag string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: tag} }
+	typedMapping := func(typeName string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			scalar("type", "!!str"), scalar(typeName, "!!str"),
+		}}
 	}
-	type args struct {
+
+	tests := []struct {
+		name     string
 		nodeName string
 		data     *yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		wantErr  bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				nodeName: "properties",
-				data: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "type",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "string",
-							Tag:   "!!str",
-						},
-					},
-				},
-			},
-			wantErr: false,
+			name:     "plain property name",
+			nodeName: "myProp",
+			data:     typedMapping("string"),
 		},
 		{
-			name: "positive case: pattern properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				nodeName: "//",
-				data: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "type",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "string",
-							Tag:   "!!str",
-						},
-					},
-				},
-			},
-			wantErr: false,
+			name:     "slash-delimited name treated as pattern property",
+			nodeName: "//",
+			data:     typedMapping("string"),
 		},
 		{
-			name: "negative case: make property error: decode error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				nodeName: "properties",
-				data: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "required",
-							Tag:   "!!bool",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "true",
-							Tag:   "!!int",
-						},
-					},
-				},
-			},
+			name:     "property with invalid 'required' decode fails",
+			nodeName: "myProp",
+			data: &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				scalar("required", "!!bool"), scalar("true", "!!int"),
+			}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
-			if err := s.unmarshalProperty(tt.args.nodeName, tt.args.data); (err != nil) != tt.wantErr {
+			r := makeTestRAML(t)
+			base := makeTestBase(t, r, "o")
+			s := &ObjectShape{BaseShape: base}
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: tt.nodeName}
+			if err := s.unmarshalProperty(keyNode, tt.data); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalProperty() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestObjectShape_unmarshalYAMLNodes verifies full YAML node parsing for ObjectShape facets.
 func TestObjectShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
+	scalar := func(val, tag string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: tag} }
+	strTypeMapping := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		scalar("type", "!!str"), scalar("string", "!!str"),
+	}}
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "positive case with all possible facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "2",
-						Tag:   "!!int",
-					},
-					{
-						Value: "maxProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "4",
-						Tag:   "!!int",
-					},
-					{
-						Value: "additionalProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "false",
-						Tag:   "!!bool",
-					},
-					{
-						Value: "discriminator",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "discriminator",
-						Tag:   "!!str",
-					},
-					{
-						Value: "discriminatorValue",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "discriminatorValue",
-						Tag:   "!!str",
-					},
-					{
-						Value: "properties",
-					},
-					{
-						Kind: yaml.MappingNode,
-						Content: []*yaml.Node{
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "type",
-								Tag:   "!!str",
-							},
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "string",
-								Tag:   "!!str",
-							},
-						},
-					},
-					{
-						Value: "custom",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "value",
-						Tag:   "!!str",
-					},
-				},
+			name: "all object facets: minProperties, maxProperties, additionalProperties, discriminator, discriminatorValue, properties, custom",
+			nodes: []*yaml.Node{
+				{Value: "minProperties"}, scalar("2", "!!int"),
+				{Value: "maxProperties"}, scalar("4", "!!int"),
+				{Value: "additionalProperties"}, scalar("false", "!!bool"),
+				{Value: "discriminator"}, scalar("kind", "!!str"),
+				{Value: "discriminatorValue"}, scalar("cat", "!!str"),
+				{Value: "properties"}, {Kind: yaml.MappingNode, Content: []*yaml.Node{
+					scalar("name", "!!str"),
+					strTypeMapping,
+				}},
+				{Value: "custom"}, scalar("value", "!!str"),
 			},
 		},
 		{
-			name: "invalid odd",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minProperties",
-					},
-				},
+			name:    "invalid minProperties type",
+			nodes:   []*yaml.Node{{Value: "minProperties"}, scalar("string", "!!str")},
+			wantErr: true,
+		},
+		{
+			name:    "invalid maxProperties type",
+			nodes:   []*yaml.Node{{Value: "maxProperties"}, scalar("string", "!!str")},
+			wantErr: true,
+		},
+		{
+			name:    "invalid additionalProperties type",
+			nodes:   []*yaml.Node{{Value: "additionalProperties"}, scalar("string", "!!str")},
+			wantErr: true,
+		},
+		{
+			name: "invalid discriminator type",
+			nodes: []*yaml.Node{
+				{Value: "discriminator"},
+				{Kind: yaml.MappingNode, Value: "{", Tag: "!!unknown"},
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid minProperties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "minProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
+			name: "invalid discriminatorValue kind",
+			nodes: []*yaml.Node{
+				{Value: "discriminatorValue"},
+				{Kind: 100500, Value: "{", Tag: "!!int"},
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid maxProperties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "maxProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
+			name: "invalid pattern property inside properties",
+			nodes: []*yaml.Node{
+				{Value: "properties"},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					scalar("//", "!!str"),
+					{Kind: yaml.MappingNode, Content: []*yaml.Node{
+						scalar("required", "!!str"), scalar("true", "!!bool"),
+					}},
+				}},
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid additionalProperties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "additionalProperties",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "string",
-						Tag:   "!!str",
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid discriminator",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "discriminator",
-					},
-					{
-						Kind:  yaml.MappingNode,
-						Value: "{",
-						Tag:   "!!unknown",
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid discriminatorValue",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "discriminatorValue",
-					},
-					{
-						Kind:  100500,
-						Value: "{",
-						Tag:   "!!int",
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid odd number of nodes in properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "properties",
-					},
-					{
-						Kind: yaml.MappingNode,
-						Content: []*yaml.Node{
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "type",
-								Tag:   "!!str",
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "properties",
-					},
-					{
-						Kind: yaml.MappingNode,
-						Content: []*yaml.Node{
-							{
-								Kind:  yaml.ScalarNode,
-								Value: "//",
-								Tag:   "!!str",
-							},
-							{
-								Kind: yaml.MappingNode,
-								Content: []*yaml.Node{
-									{
-										Kind:  yaml.ScalarNode,
-										Value: "required",
-										Tag:   "!!str",
-									},
-									{
-										Kind:  yaml.ScalarNode,
-										Value: "true",
-										Tag:   "!!bool",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid custom facet",
-			fields: fields{
-				BaseShape: &BaseShape{
-					raml:              &RAML{},
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Value: "value",
-						Tag:   "!!int",
-					},
-				},
-			},
+			name:    "invalid custom facet tag",
+			nodes:   []*yaml.Node{{Value: "custom"}, scalar("value", "!!int")},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			r := makeTestRAML(t)
+			base := makeTestBase(t, r, "o")
+			s := &ObjectShape{BaseShape: base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestObjectShape_clone verifies that clone produces a deep-copied ObjectShape.
 func TestObjectShape_clone(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		base      *BaseShape
-		clonedMap map[int64]*BaseShape
-	}
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   func(got Shape) (string, bool)
+		name  string
+		src   *ObjectShape
+		check func(*ObjectShape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
+			name: "properties and patternProperties are deep-copied",
+			src: &ObjectShape{
+				BaseShape: &BaseShape{ID: 1},
 				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("test", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("test", PatternProperty{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
+					Properties: newPropsMap(
+						propEntry{"name", stringProp("name", 10)},
+					),
+					PatternProperties: newPatternPropsMap(
+						patternProp("^id.*", 20),
+					),
 				},
 			},
-			args: args{
-				base: &BaseShape{
-					ID: 2,
-				},
-				clonedMap: map[int64]*BaseShape{},
-			},
-			want: func(got Shape) (string, bool) {
-				obj, ok := got.(*ObjectShape)
-				if !ok {
-					return "expected to get *ObjectShape", false
+			check: func(s *ObjectShape) {
+				if s.ID == 1 {
+					t.Error("clone() ID unchanged, expected a different base")
 				}
-				if obj.ID == 1 {
-					return "ID hasn't been cloned", false
+				if s.Properties == nil {
+					t.Error("Properties should be present after clone")
 				}
-				return "", true
+				if s.PatternProperties == nil {
+					t.Error("PatternProperties should be present after clone")
+				}
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+			got := tt.src.clone(&BaseShape{ID: 99}, make(map[int64]*BaseShape))
+			obj, ok := got.(*ObjectShape)
+			if !ok {
+				t.Fatalf("clone() type = %T, want *ObjectShape", got)
 			}
-			got := s.clone(tt.args.base, tt.args.clonedMap)
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
-			} else {
-				t.Errorf("No want function provided")
-			}
+			tt.check(obj)
 		})
 	}
 }
 
+// TestObjectShape_validateProperties verifies property-level validation logic.
 func TestObjectShape_validateProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		ctxPath string
-		props   map[string]interface{}
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		facets  ObjectFacets
+		props   map[string]any
 		wantErr bool
 	}{
 		{
-			name: "positive case without additional properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					AdditionalProperties: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
+			name: "all required properties present, additionalProperties forbidden",
+			facets: ObjectFacets{
+				Properties:           newPropsMap(propEntry{"name", stringProp("name", 1)}),
+				AdditionalProperties: scalarFacetOf(false),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"property": "property",
-				},
-			},
+			props: map[string]any{"name": "Alice"},
 		},
 		{
-			name: "positive case with additional property",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					AdditionalProperties: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "extra property allowed when additionalProperties=true",
+			facets: ObjectFacets{
+				AdditionalProperties: scalarFacetOf(true),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"additional_property": "additional property",
-				},
-			},
+			props: map[string]any{"unknown": "value"},
 		},
 		{
-			name: "negative case: validate property error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
+			name: "property value fails type validation",
+			facets: ObjectFacets{
+				Properties: newPropsMap(propEntry{"age", Property{
+					Base: &BaseShape{Shape: &StringShape{}},
+				}}),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"property": 123,
-				},
-			},
+			props:   map[string]any{"age": 42},
 			wantErr: true,
 		},
 		{
-			name: "negative case: validate pattern property error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
+			name: "pattern property value fails type validation",
+			facets: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key: "/^tag.*/",
+					prop: PatternProperty{
+						Pattern: regexp.MustCompile("^tag.*"),
+						Base:    &BaseShape{Shape: &StringShape{}},
+					},
+				}),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"pattern": 123,
-				},
-			},
+			props:   map[string]any{"tagX": 42},
 			wantErr: true,
 		},
 		{
-			name: "negative case: property is not present",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					AdditionalProperties: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
+			name: "required property absent, additionalProperties forbidden",
+			facets: ObjectFacets{
+				Properties: newPropsMap(propEntry{"name", Property{
+					Base: &BaseShape{Shape: &StringShape{}},
+				}}),
+				AdditionalProperties: scalarFacetOf(false),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"additional_property": "additional property",
-				},
-			},
+			props:   map[string]any{"other": "val"},
 			wantErr: true,
 		},
 		{
-			name: "negative case: additional property error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					AdditionalProperties: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
+			name: "extra property present but additionalProperties=false",
+			facets: ObjectFacets{
+				AdditionalProperties: scalarFacetOf(false),
 			},
-			args: args{
-				ctxPath: "test",
-				props: map[string]interface{}{
-					"additional_property": "additional property",
-				},
-			},
+			props:   map[string]any{"extra": "value"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: tt.facets,
 			}
-			if err := s.validateProperties(tt.args.ctxPath, tt.args.props); (err != nil) != tt.wantErr {
+			if err := s.validateProperties("$", tt.props); (err != nil) != tt.wantErr {
 				t.Errorf("validateProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestObjectShape_validate verifies top-level object validation including property counts.
 func TestObjectShape_validate(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		v       interface{}
-		ctxPath string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		facets  ObjectFacets
+		v       any
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-					MaxProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					AdditionalProperties: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
+			name: "object within min/max property bounds",
+			facets: ObjectFacets{
+				MinProperties:        scalarFacetOf(uint64(2)),
+				MaxProperties:        scalarFacetOf(uint64(4)),
+				AdditionalProperties: scalarFacetOf(true),
 			},
-			args: args{
-				v: map[string]interface{}{
-					"property1": "property1",
-					"property2": "property2",
-					"property3": "property3",
-					"property4": "property3",
-				},
+			v: map[string]any{
+				"a": 1, "b": 2, "c": 3,
 			},
 		},
 		{
-			name: "negative case: invalid value type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				v: 123,
-			},
+			name:    "non-map value rejected",
+			facets:  ObjectFacets{},
+			v:       42,
 			wantErr: true,
 		},
 		{
-			name: "negative case: additional properties constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					AdditionalProperties: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
+			name: "too few properties",
+			facets: ObjectFacets{
+				MinProperties: scalarFacetOf(uint64(2)),
 			},
-			args: args{
-				v: map[string]interface{}{
-					"property": "property",
-				},
-			},
+			v:       map[string]any{"a": 1},
 			wantErr: true,
 		},
 		{
-			name: "negative case: max properties constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MaxProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "too many properties",
+			facets: ObjectFacets{
+				MaxProperties: scalarFacetOf(uint64(2)),
 			},
-			args: args{
-				v: map[string]interface{}{
-					"property1": "property1",
-					"property2": "property2",
-					"property3": "property3",
-				},
-			},
+			v:       map[string]any{"a": 1, "b": 2, "c": 3},
 			wantErr: true,
 		},
 		{
-			name: "negative case: min properties constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "extra property rejected because additionalProperties=false",
+			facets: ObjectFacets{
+				AdditionalProperties: scalarFacetOf(false),
 			},
-			args: args{
-				v: map[string]interface{}{
-					"property1": "property1",
-				},
-			},
+			v:       map[string]any{"unknown": "val"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: tt.facets,
 			}
-			if err := s.validate(tt.args.v, tt.args.ctxPath); (err != nil) != tt.wantErr {
+			if err := s.validate(tt.v, ""); (err != nil) != tt.wantErr {
 				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -1758,137 +825,48 @@ func TestObjectShape_validate(t *testing.T) {
 }
 
 func TestObjectShape_inheritMinProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		source *ObjectShape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got *ObjectShape) (string, bool)
-		wantErr bool
+		name         string
+		targetMin    *ScalarFacet[uint64]
+		sourceMin    *ScalarFacet[uint64]
+		wantErr      bool
+		wantMinValue uint64
 	}{
 		{
-			name: "positive case with min properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MinProperties: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MinProperties == nil {
-					return "MinProperties hasn't been inherited", false
-				}
-				if *got.MinProperties != 4 {
-					return "MinProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "target present, larger than source — keep target",
+			targetMin:    scalarFacetOf(uint64(4)),
+			sourceMin:    scalarFacetOf(uint64(2)),
+			wantMinValue: 4,
 		},
 		{
-			name: "positive case without min properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MinProperties: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MinProperties == nil {
-					return "MinProperties hasn't been inherited", false
-				}
-				if *got.MinProperties != 4 {
-					return "MinProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "target absent — inherit from source",
+			sourceMin:    scalarFacetOf(uint64(4)),
+			wantMinValue: 4,
 		},
 		{
-			name: "negative case: min properties inheritance error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MinProperties: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MinProperties == nil {
-					return "MinProperties hasn't been inherited", false
-				}
-				if *got.MinProperties != 2 {
-					return "MinProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:      "target smaller than source — constraint violation",
+			targetMin: scalarFacetOf(uint64(2)),
+			sourceMin: scalarFacetOf(uint64(4)),
+			wantErr:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: ObjectFacets{MinProperties: tt.targetMin},
 			}
-			if err := s.inheritMinProperties(tt.args.source); (err != nil) != tt.wantErr {
+			src := &ObjectShape{
+				BaseShape:    &BaseShape{ID: 2},
+				ObjectFacets: ObjectFacets{MinProperties: tt.sourceMin},
+			}
+			err := s.inheritMinProperties(src)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("inheritMinProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(s); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
+			if !tt.wantErr {
+				if s.MinProperties == nil || s.MinProperties.Value != tt.wantMinValue {
+					t.Errorf("MinProperties.Value = %v, want %v", s.MinProperties, tt.wantMinValue)
 				}
 			}
 		})
@@ -1896,137 +874,48 @@ func TestObjectShape_inheritMinProperties(t *testing.T) {
 }
 
 func TestObjectShape_inheritMaxProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		source *ObjectShape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got *ObjectShape) (string, bool)
-		wantErr bool
+		name         string
+		targetMax    *ScalarFacet[uint64]
+		sourceMax    *ScalarFacet[uint64]
+		wantErr      bool
+		wantMaxValue uint64
 	}{
 		{
-			name: "positive case with max properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MaxProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MaxProperties: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MaxProperties == nil {
-					return "MaxProperties hasn't been inherited", false
-				}
-				if *got.MaxProperties != 2 {
-					return "MaxProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "target present, smaller than source — keep target",
+			targetMax:    scalarFacetOf(uint64(2)),
+			sourceMax:    scalarFacetOf(uint64(4)),
+			wantMaxValue: 2,
 		},
 		{
-			name: "positive case without max properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MaxProperties: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MaxProperties == nil {
-					return "MaxProperties hasn't been inherited", false
-				}
-				if *got.MaxProperties != 4 {
-					return "MaxProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "target absent — inherit from source",
+			sourceMax:    scalarFacetOf(uint64(4)),
+			wantMaxValue: 4,
 		},
 		{
-			name: "negative case: max properties inheritance error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MaxProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MaxProperties: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-			want: func(got *ObjectShape) (string, bool) {
-				if got.MaxProperties == nil {
-					return "MaxProperties hasn't been inherited", false
-				}
-				if *got.MaxProperties != 4 {
-					return "MaxProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:      "target larger than source — constraint violation",
+			targetMax: scalarFacetOf(uint64(4)),
+			sourceMax: scalarFacetOf(uint64(2)),
+			wantErr:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: ObjectFacets{MaxProperties: tt.targetMax},
 			}
-			if err := s.inheritMaxProperties(tt.args.source); (err != nil) != tt.wantErr {
+			src := &ObjectShape{
+				BaseShape:    &BaseShape{ID: 2},
+				ObjectFacets: ObjectFacets{MaxProperties: tt.sourceMax},
+			}
+			err := s.inheritMaxProperties(src)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("inheritMaxProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(s); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
+			if !tt.wantErr {
+				if s.MaxProperties == nil || s.MaxProperties.Value != tt.wantMaxValue {
+					t.Errorf("MaxProperties.Value = %v, want %v", s.MaxProperties, tt.wantMaxValue)
 				}
 			}
 		})
@@ -2034,810 +923,302 @@ func TestObjectShape_inheritMaxProperties(t *testing.T) {
 }
 
 func TestObjectShape_inheritProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		source *ObjectShape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-		want    func(got *ObjectShape) (string, bool)
+		name        string
+		targetProps *orderedmap.OrderedMap[string, Property]
+		sourceProps *orderedmap.OrderedMap[string, Property]
+		wantErr     bool
+		check       func(*ObjectShape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property2", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							m.Set("property", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.Properties == nil {
-					return "Properties hasn't been inherited", false
+			name:        "source properties merged into target",
+			targetProps: newPropsMap(propEntry{"existing", stringProp("existing", 1)}),
+			sourceProps: newPropsMap(
+				propEntry{"existing", stringProp("existing", 2)},
+				propEntry{"new", stringProp("new", 3)},
+			),
+			check: func(s *ObjectShape) {
+				if s.Properties.Len() != 2 {
+					t.Errorf("Properties.Len() = %d, want 2", s.Properties.Len())
 				}
-				if got.Properties.Len() != 2 {
-					return "Properties hasn't been inherited correctly", false
+				if _, ok := s.Properties.Get("new"); !ok {
+					t.Error("'new' property not inherited from source")
 				}
-				if _, ok := got.Properties.Get("property"); !ok {
-					return "Properties hasn't been inherited correctly", false
-				}
-				if _, ok := got.Properties.Get("property2"); !ok {
-					return "Properties hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "positive case: nil properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property2", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.Properties == nil {
-					return "Properties hasn't been inherited", false
+			name:        "target has no properties — all inherited from source",
+			targetProps: nil,
+			sourceProps: newPropsMap(propEntry{"fromSource", stringProp("fromSource", 1)}),
+			check: func(s *ObjectShape) {
+				if s.Properties == nil || s.Properties.Len() != 1 {
+					t.Errorf("Properties.Len() = %d, want 1", s.Properties.Len())
 				}
-				if got.Properties.Len() != 1 {
-					return "Properties hasn't been inherited correctly", false
-				}
-				if _, ok := got.Properties.Get("property2"); !ok {
-					return "Properties hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "positive case: nil source properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.Properties == nil {
-					return "Properties hasn't been inherited", false
+			name:        "source has no properties — target unchanged",
+			targetProps: newPropsMap(propEntry{"existing", stringProp("existing", 1)}),
+			sourceProps: nil,
+			check: func(s *ObjectShape) {
+				if s.Properties.Len() != 1 {
+					t.Errorf("Properties.Len() = %d, want 1", s.Properties.Len())
 				}
-				if got.Properties.Len() != 1 {
-					return "Properties hasn't been inherited correctly", false
-				}
-				if _, ok := got.Properties.Get("property"); !ok {
-					return "Properties hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot make required property optional",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-							Required: false,
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-								Required: true,
-							})
-							return m
-						}(),
-					},
-				},
-			},
+			name: "making required source property optional in target is rejected",
+			targetProps: newPropsMap(propEntry{"name", Property{
+				Base:     &BaseShape{Shape: &StringShape{}},
+				Required: false,
+			}}),
+			sourceProps: newPropsMap(propEntry{"name", Property{
+				Base:     &BaseShape{Shape: &StringShape{}},
+				Required: true,
+			}}),
 			wantErr: true,
 		},
 		{
-			name: "negative: cannot inherit properties with different types",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property", Property{
-								Base: &BaseShape{
-									Shape: &NumberShape{
-										BaseShape: &BaseShape{
-											Type: "number",
-										},
-									},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
+			name: "incompatible property types are rejected",
+			targetProps: newPropsMap(propEntry{"kind", Property{
+				Base: &BaseShape{Shape: &StringShape{BaseShape: &BaseShape{KeyPos: stacktrace.Position{}}}},
+			}}),
+			sourceProps: newPropsMap(propEntry{"kind", Property{
+				Base: &BaseShape{Shape: &NumberShape{BaseShape: &BaseShape{Type: "number"}}},
+			}}),
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: ObjectFacets{Properties: tt.targetProps},
 			}
-			if err := s.inheritProperties(tt.args.source); (err != nil) != tt.wantErr {
+			src := &ObjectShape{
+				BaseShape:    &BaseShape{ID: 2},
+				ObjectFacets: ObjectFacets{Properties: tt.sourceProps},
+			}
+			err := s.inheritProperties(src)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("inheritProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(s); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(s)
 			}
 		})
 	}
 }
 
 func TestObjectShape_inheritPatternProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		source *ObjectShape
-	}
+	pp1 := patternPropEntry{key: "/^prefix.*/", prop: PatternProperty{
+		Pattern: regexp.MustCompile("^prefix.*"),
+		Base:    &BaseShape{Shape: &StringShape{}},
+	}}
+	pp2 := patternPropEntry{key: "/^extra.*/", prop: PatternProperty{
+		Pattern: regexp.MustCompile("^extra.*"),
+		Base:    &BaseShape{Shape: &StringShape{}},
+	}}
+	pp1Incompatible := patternPropEntry{key: "/^prefix.*/", prop: PatternProperty{
+		Pattern: regexp.MustCompile("^prefix.*"),
+		Base:    &BaseShape{Shape: &NumberShape{BaseShape: &BaseShape{Type: "number"}}},
+	}}
+
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-		want    func(got *ObjectShape) (string, bool)
+		name         string
+		targetPPs    *orderedmap.OrderedMap[string, PatternProperty]
+		sourcePPs    *orderedmap.OrderedMap[string, PatternProperty]
+		wantErr      bool
+		wantPPsCount int
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						m.Set("/^third_pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							m.Set("/^second_pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.PatternProperties == nil {
-					return "PatternProperties hasn't been inherited", false
-				}
-				if got.PatternProperties.Len() != 3 {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				if _, ok := got.PatternProperties.Get("/^pattern*/"); !ok {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				if _, ok := got.PatternProperties.Get("/^second_pattern*/"); !ok {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				if _, ok := got.PatternProperties.Get("/^third_pattern*/"); !ok {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "source pattern properties merged into target",
+			targetPPs:    newPatternPropsMap(pp1),
+			sourcePPs:    newPatternPropsMap(pp1, pp2),
+			wantPPsCount: 2,
 		},
 		{
-			name: "positive case: nil pattern properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			want: func(got *ObjectShape) (string, bool) {
-				if got.PatternProperties == nil {
-					return "PatternProperties hasn't been inherited", false
-				}
-				if got.PatternProperties.Len() != 1 {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				if _, ok := got.PatternProperties.Get("/^pattern*/"); !ok {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				return "", true
-			},
+			name:         "target has none — all inherited from source",
+			sourcePPs:    newPatternPropsMap(pp1),
+			wantPPsCount: 1,
 		},
 		{
-			name: "negative: cannot inherit pattern properties with different types",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
+			name: "incompatible pattern property types rejected",
+			targetPPs: newPatternPropsMap(patternPropEntry{
+				key: "/^prefix.*/",
+				prop: PatternProperty{
+					Pattern: regexp.MustCompile("^prefix.*"),
+					Base:    &BaseShape{Shape: &StringShape{BaseShape: &BaseShape{KeyPos: stacktrace.Position{}}}},
 				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &NumberShape{
-										BaseShape: &BaseShape{
-											Type: "number",
-										},
-									},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			wantErr: true,
+			}),
+			sourcePPs: newPatternPropsMap(pp1Incompatible),
+			wantErr:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: ObjectFacets{PatternProperties: tt.targetPPs},
 			}
-			if err := s.inheritPatternProperties(tt.args.source); (err != nil) != tt.wantErr {
+			src := &ObjectShape{
+				BaseShape:    &BaseShape{ID: 2},
+				ObjectFacets: ObjectFacets{PatternProperties: tt.sourcePPs},
+			}
+			err := s.inheritPatternProperties(src)
+			if (err != nil) != tt.wantErr {
 				t.Errorf("inheritPatternProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(s); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && s.PatternProperties.Len() != tt.wantPPsCount {
+				t.Errorf("PatternProperties.Len() = %d, want %d", s.PatternProperties.Len(), tt.wantPPsCount)
 			}
 		})
 	}
 }
 
+// TestObjectShape_inherit verifies the full Object inherit pipeline.
 func TestObjectShape_inherit(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  ObjectFacets
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
+			name: "all facets inherited or kept from source",
+			target: ObjectFacets{
+				MinProperties: scalarFacetOf(uint64(2)),
+				MaxProperties: scalarFacetOf(uint64(4)),
+				Properties:    newPropsMap(propEntry{"a", stringProp("a", 1)}),
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key:  "/^p.*/",
+					prop: PatternProperty{Pattern: regexp.MustCompile("^p.*"), Base: &BaseShape{Shape: &StringShape{}}},
+				}),
+			},
+			source: &ObjectShape{
+				BaseShape: &BaseShape{ID: 99},
 				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-					MaxProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
+					MinProperties: scalarFacetOf(uint64(1)),
+					MaxProperties: scalarFacetOf(uint64(5)),
+					Properties: newPropsMap(
+						propEntry{"a", stringProp("a", 2)},
+						propEntry{"b", stringProp("b", 3)},
+					),
+					PatternProperties: newPatternPropsMap(
+						patternPropEntry{
+							key:  "/^p.*/",
+							prop: PatternProperty{Pattern: regexp.MustCompile("^p.*"), Base: &BaseShape{Shape: &StringShape{}}},
+						},
+						patternPropEntry{
+							key:  "/^q.*/",
+							prop: PatternProperty{Pattern: regexp.MustCompile("^q.*"), Base: &BaseShape{Shape: &StringShape{}}},
+						},
+					),
+					AdditionalProperties: scalarFacetOf(false),
+					Discriminator:        scalarFacetOf("kind"),
+					DiscriminatorValue:   &DataNode{Value: NewScalarNodeValue("cat")},
 				},
 			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MinProperties: func() *uint64 {
-							i := uint64(1)
-							return &i
-						}(),
-						MaxProperties: func() *uint64 {
-							i := uint64(5)
-							return &i
-						}(),
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property2", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							m.Set("property", Property{
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							m.Set("/^second_pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &StringShape{},
-								},
-							})
-							return m
-						}(),
-						AdditionalProperties: func() *bool {
-							b := false
-							return &b
-						}(),
-						Discriminator: func() *string {
-							d := "discriminator2"
-							return &d
-						}(),
-						DiscriminatorValue: func() any {
-							d := "discriminator_value2"
-							return &d
-						}(),
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*ObjectShape)
-				if !ok {
-					return "Shape hasn't been inherited", false
+			check: func(got Shape) {
+				obj := got.(*ObjectShape)
+				if obj.MinProperties == nil || obj.MinProperties.Value != 2 {
+					t.Error("MinProperties mismatch")
 				}
-				if s.MinProperties == nil {
-					return "MinProperties hasn't been inherited", false
+				if obj.MaxProperties == nil || obj.MaxProperties.Value != 4 {
+					t.Error("MaxProperties mismatch")
 				}
-				if *s.MinProperties != 2 {
-					return "MinProperties hasn't been inherited correctly", false
+				if obj.Properties.Len() != 2 {
+					t.Errorf("Properties.Len() = %d, want 2", obj.Properties.Len())
 				}
-				if s.MaxProperties == nil {
-					return "MaxProperties hasn't been inherited", false
+				if obj.PatternProperties.Len() != 2 {
+					t.Errorf("PatternProperties.Len() = %d, want 2", obj.PatternProperties.Len())
 				}
-				if *s.MaxProperties != 4 {
-					return "MaxProperties hasn't been inherited correctly", false
+				if obj.AdditionalProperties == nil || obj.AdditionalProperties.Value != false {
+					t.Error("AdditionalProperties not inherited")
 				}
-				if s.Properties == nil {
-					return "Properties hasn't been inherited", false
+				if obj.Discriminator == nil || obj.Discriminator.Value != "kind" {
+					t.Error("Discriminator not inherited")
 				}
-				if s.Properties.Len() != 2 {
-					return "Properties hasn't been inherited correctly", false
-				}
-				if s.PatternProperties == nil {
-					return "PatternProperties hasn't been inherited", false
-				}
-				if s.PatternProperties.Len() != 2 {
-					return "PatternProperties hasn't been inherited correctly", false
-				}
-				if s.AdditionalProperties == nil {
-					return "AdditionalProperties hasn't been inherited", false
-				}
-				if *s.AdditionalProperties != false {
-					return "AdditionalProperties hasn't been inherited correctly", false
-				}
-				if s.Discriminator == nil {
-					return "Discriminator hasn't been inherited", false
-				}
-				if *s.Discriminator != "discriminator2" {
-					return "Discriminator hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "positive case with recursive source",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				source: &RecursiveShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					Head: &BaseShape{
-						// Source
-						Shape: &ObjectShape{
-							BaseShape: &BaseShape{
-								ID: 3,
-							},
-							ObjectFacets: ObjectFacets{
-								Properties: func() *orderedmap.OrderedMap[string, Property] {
-									m := orderedmap.New[string, Property](0)
-									m.Set("property", Property{
-										Base: &BaseShape{
-											Shape: &StringShape{},
-										},
-									})
-									return m
-								}(),
-							},
+			name:   "recursive source shape is unwrapped",
+			target: ObjectFacets{},
+			source: &RecursiveShape{
+				BaseShape: &BaseShape{ID: 2},
+				Head: &BaseShape{
+					Shape: &ObjectShape{
+						BaseShape: &BaseShape{ID: 3},
+						ObjectFacets: ObjectFacets{
+							Properties: newPropsMap(propEntry{"x", stringProp("x", 4)}),
 						},
 					},
 				},
 			},
-			want: func(got Shape) (string, bool) {
-				if _, ok := got.(*ObjectShape); !ok {
-					return "Shape hasn't been inherited", false
+			check: func(got Shape) {
+				obj := got.(*ObjectShape)
+				if _, ok := obj.Properties.Get("x"); !ok {
+					t.Error("property 'x' not inherited from recursive source")
 				}
-				if _, ok := got.(*ObjectShape).Properties.Get("property"); !ok {
-					return "Properties hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot inherit object shape with different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
+			name:    "incompatible source type rejected",
+			target:  ObjectFacets{},
+			source:  &StringShape{BaseShape: &BaseShape{ID: 2}},
+			wantErr: true,
+		},
+		{
+			name:    "minProperties constraint violation",
+			target:  ObjectFacets{MinProperties: scalarFacetOf(uint64(2))},
+			source:  &ObjectShape{BaseShape: &BaseShape{ID: 2}, ObjectFacets: ObjectFacets{MinProperties: scalarFacetOf(uint64(4))}},
+			wantErr: true,
+		},
+		{
+			name:    "maxProperties constraint violation",
+			target:  ObjectFacets{MaxProperties: scalarFacetOf(uint64(4))},
+			source:  &ObjectShape{BaseShape: &BaseShape{ID: 2}, ObjectFacets: ObjectFacets{MaxProperties: scalarFacetOf(uint64(2))}},
+			wantErr: true,
+		},
+		{
+			name: "incompatible property type rejected",
+			target: ObjectFacets{
+				Properties: newPropsMap(propEntry{"kind", Property{
+					Base: &BaseShape{Shape: &StringShape{BaseShape: &BaseShape{KeyPos: stacktrace.Position{}}}},
+				}}),
 			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
+			source: &ObjectShape{
+				BaseShape: &BaseShape{ID: 2},
+				ObjectFacets: ObjectFacets{
+					Properties: newPropsMap(propEntry{"kind", Property{
+						Base: &BaseShape{Shape: &NumberShape{BaseShape: &BaseShape{Type: "number"}}},
+					}}),
 				},
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative: cannot inherit min properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
+			name: "incompatible pattern property type rejected",
+			target: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key: "/^p.*/",
+					prop: PatternProperty{
+						Pattern: regexp.MustCompile("^p.*"),
+						Base:    &BaseShape{Shape: &StringShape{BaseShape: &BaseShape{KeyPos: stacktrace.Position{}}}},
+					},
+				}),
+			},
+			source: &ObjectShape{
+				BaseShape: &BaseShape{ID: 2},
 				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MinProperties: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative: cannot inherit max properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MaxProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						MaxProperties: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative: cannot inherit properties with different types",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property", Property{
-								Base: &BaseShape{
-									Shape: &NumberShape{
-										BaseShape: &BaseShape{
-											Type: "number",
-										},
-									},
-								},
-							})
-							return m
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative: cannot inherit pattern properties with different types",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					ObjectFacets: ObjectFacets{
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									Shape: &NumberShape{
-										BaseShape: &BaseShape{
-											Type: "number",
-										},
-									},
-								},
-							})
-							return m
-						}(),
-					},
+					PatternProperties: newPatternPropsMap(patternPropEntry{
+						key: "/^p.*/",
+						prop: PatternProperty{
+							Pattern: regexp.MustCompile("^p.*"),
+							Base:    &BaseShape{Shape: &NumberShape{BaseShape: &BaseShape{Type: "number"}}},
+						},
+					}),
 				},
 			},
 			wantErr: true,
@@ -2846,132 +1227,73 @@ func TestObjectShape_inherit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
+				BaseShape:    &BaseShape{ID: 1},
+				ObjectFacets: tt.target,
 			}
-			got, err := s.inherit(tt.args.source)
+			got, err := s.inherit(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
 func TestObjectShape_checkPatternProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		facets  ObjectFacets
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-				},
+			name: "valid pattern property",
+			facets: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternProp("^tag.*", 1)),
 			},
 		},
 		{
-			name: "positive case: nil pattern properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
+			name:   "nil pattern properties",
+			facets: ObjectFacets{},
 		},
 		{
-			name: "negative case: pattern properties with additional properties false",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					AdditionalProperties: func() *bool {
-						b := false
-						return &b
-					}(),
-				},
+			name: "pattern properties conflict with additionalProperties=false",
+			facets: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key:  "/^tag.*/",
+					prop: PatternProperty{Pattern: regexp.MustCompile("^tag.*"), Base: &BaseShape{Shape: &StringShape{}}},
+				}),
+				AdditionalProperties: scalarFacetOf(false),
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative case: invalid pattern property string shape",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{
-									// minLength must be less than or equal to maxLength
-									StringFacets: StringFacets{
-										LengthFacets: LengthFacets{
-											MinLength: func() *uint64 {
-												i := uint64(10)
-												return &i
-											}(),
-											MaxLength: func() *uint64 {
-												i := uint64(5)
-												return &i
-											}(),
-										},
-									},
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
+			name: "invalid pattern property shape",
+			facets: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key: "/^p.*/",
+					prop: PatternProperty{
+						Pattern: regexp.MustCompile("^p.*"),
+						Base: &BaseShape{
+							Shape: &StringShape{
+								StringFacets: StringFacets{LengthFacets: LengthFacets{
+									MinLength: scalarFacetOf(uint64(10)),
+									MaxLength: scalarFacetOf(uint64(5)),
+								}},
+								BaseShape: &BaseShape{KeyPos: stacktrace.Position{}},
 							},
-						})
-						return m
-					}(),
-				},
+						},
+					},
+				}),
 			},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
+			s := &ObjectShape{BaseShape: &BaseShape{ID: 1}, ObjectFacets: tt.facets}
 			if err := s.checkPatternProperties(); (err != nil) != tt.wantErr {
 				t.Errorf("checkPatternProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -2980,162 +1302,70 @@ func TestObjectShape_checkPatternProperties(t *testing.T) {
 }
 
 func TestObjectShape_checkProperties(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		facets  ObjectFacets
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					Discriminator: func() *string {
-						d := "property"
-						return &d
-					}(),
-				},
+			name: "valid properties with discriminator matching a defined property",
+			facets: ObjectFacets{
+				Properties:    newPropsMap(propEntry{"kind", stringProp("kind", 1)}),
+				Discriminator: scalarFacetOf("kind"),
 			},
 		},
 		{
-			name: "positive case: nil properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
+			name:   "nil properties",
+			facets: ObjectFacets{},
 		},
 		{
-			name: "negative case: invalid property string shape",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{
-									// minLength must be less than or equal to maxLength
-									StringFacets: StringFacets{
-										LengthFacets: LengthFacets{
-											MinLength: func() *uint64 {
-												i := uint64(10)
-												return &i
-											}(),
-											MaxLength: func() *uint64 {
-												i := uint64(5)
-												return &i
-											}(),
-										},
-									},
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative case: discriminator property not found",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						return m
-					}(),
-					Discriminator: func() *string {
-						d := "property"
-						return &d
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative case: discriminator property is not a scalar",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &ObjectShape{},
-							},
-						})
-						return m
-					}(),
-					Discriminator: func() *string {
-						d := "property"
-						return &d
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative case: invalid discriminator value",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{},
-							},
-						})
-						return m
-					}(),
-					Discriminator: func() *string {
-						d := "property"
-						return &d
-					}(),
-					DiscriminatorValue: func() any {
-						d := 1
-						return &d
+			name: "invalid nested property shape",
+			facets: ObjectFacets{
+				Properties: newPropsMap(propEntry{"x", Property{
+					Base: &BaseShape{
+						Shape: &StringShape{
+							StringFacets: StringFacets{LengthFacets: LengthFacets{
+								MinLength: scalarFacetOf(uint64(10)),
+								MaxLength: scalarFacetOf(uint64(5)),
+							}},
+							BaseShape: &BaseShape{KeyPos: stacktrace.Position{}},
+						},
 					},
-				},
+				}}),
+			},
+			wantErr: true,
+		},
+		{
+			name: "discriminator references missing property",
+			facets: ObjectFacets{
+				Properties:    newPropsMap(),
+				Discriminator: scalarFacetOf("missing"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "discriminator property is not a scalar shape",
+			facets: ObjectFacets{
+				Properties: newPropsMap(propEntry{"kind", Property{
+					Base: &BaseShape{Shape: &ObjectShape{BaseShape: &BaseShape{}}},
+				}}),
+				Discriminator: scalarFacetOf("kind"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "discriminatorValue has wrong type",
+			facets: ObjectFacets{
+				Properties:         newPropsMap(propEntry{"kind", Property{Base: &BaseShape{Shape: &StringShape{}}}}),
+				Discriminator:      scalarFacetOf("kind"),
+				DiscriminatorValue: &DataNode{Value: NewScalarNodeValue(1)},
 			},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
+			s := &ObjectShape{BaseShape: &BaseShape{ID: 1}, ObjectFacets: tt.facets}
 			if err := s.checkProperties(); (err != nil) != tt.wantErr {
 				t.Errorf("checkProperties() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -3144,142 +1374,72 @@ func TestObjectShape_checkProperties(t *testing.T) {
 }
 
 func TestObjectShape_check(t *testing.T) {
-	type fields struct {
-		NoScalarShape noScalarShape
-		BaseShape     *BaseShape
-		ObjectFacets  ObjectFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		facets  ObjectFacets
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
+			name:   "empty facets pass check",
+			facets: ObjectFacets{},
 		},
 		{
-			name: "negative case: minProperties must be less than or equal to maxProperties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					MinProperties: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-					MaxProperties: func() *uint64 {
-						i := uint64(2)
-						return &i
-					}(),
-				},
+			name: "minProperties greater than maxProperties",
+			facets: ObjectFacets{
+				MinProperties: scalarFacetOf(uint64(4)),
+				MaxProperties: scalarFacetOf(uint64(2)),
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative case: invalid properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Base: &BaseShape{
-								Shape: &StringShape{
-									// minLength must be less than or equal to maxLength
-									StringFacets: StringFacets{
-										LengthFacets: LengthFacets{
-											MinLength: func() *uint64 {
-												i := uint64(10)
-												return &i
-											}(),
-											MaxLength: func() *uint64 {
-												i := uint64(5)
-												return &i
-											}(),
-										},
-									},
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
+			name: "invalid nested property shape",
+			facets: ObjectFacets{
+				Properties: newPropsMap(propEntry{"x", Property{
+					Base: &BaseShape{
+						Shape: &StringShape{
+							StringFacets: StringFacets{LengthFacets: LengthFacets{
+								MinLength: scalarFacetOf(uint64(10)),
+								MaxLength: scalarFacetOf(uint64(5)),
+							}},
+							BaseShape: &BaseShape{KeyPos: stacktrace.Position{}},
+						},
+					},
+				}}),
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid pattern property shape",
+			facets: ObjectFacets{
+				PatternProperties: newPatternPropsMap(patternPropEntry{
+					key: "/^p.*/",
+					prop: PatternProperty{
+						Pattern: regexp.MustCompile("^p.*"),
+						Base: &BaseShape{
+							Shape: &StringShape{
+								StringFacets: StringFacets{LengthFacets: LengthFacets{
+									MinLength: scalarFacetOf(uint64(10)),
+									MaxLength: scalarFacetOf(uint64(5)),
+								}},
+								BaseShape: &BaseShape{KeyPos: stacktrace.Position{}},
 							},
-						})
-						return m
-					}(),
-				},
+						},
+					},
+				}),
 			},
 			wantErr: true,
 		},
 		{
-			name: "negative case: invalid pattern properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								Shape: &StringShape{
-									// minLength must be less than or equal to maxLength
-									StringFacets: StringFacets{
-										LengthFacets: LengthFacets{
-											MinLength: func() *uint64 {
-												i := uint64(10)
-												return &i
-											}(),
-											MaxLength: func() *uint64 {
-												i := uint64(5)
-												return &i
-											}(),
-										},
-									},
-									BaseShape: &BaseShape{
-										Position: stacktrace.Position{},
-									},
-								},
-							},
-						})
-						return m
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative case: discriminator without properties",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Discriminator: func() *string {
-						d := "property"
-						return &d
-					}(),
-				},
+			name: "discriminator without any properties",
+			facets: ObjectFacets{
+				Discriminator: scalarFacetOf("kind"),
 			},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				noScalarShape: tt.fields.NoScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				ObjectFacets:  tt.fields.ObjectFacets,
-			}
+			s := &ObjectShape{BaseShape: &BaseShape{ID: 1}, ObjectFacets: tt.facets}
 			if err := s.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -3287,576 +1447,334 @@ func TestObjectShape_check(t *testing.T) {
 	}
 }
 
+// TestRAML_makePatternProperty verifies pattern-property creation from YAML.
 func TestRAML_makePatternProperty(t *testing.T) {
-	type fields struct {
-		fragmentsCache          map[string]Fragment
-		fragmentTypes           map[string]map[string]*BaseShape
-		fragmentAnnotationTypes map[string]map[string]*BaseShape
-		entryPoint              Fragment
-		domainExtensions        []*DomainExtension
-		shapes                  []*BaseShape
-		unresolvedShapes        list.List
-		ctx                     context.Context
-	}
-	type args struct {
-		nodeName            string
-		propertyName        string
-		v                   *yaml.Node
-		location            string
-		hasImplicitOptional bool
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got PatternProperty) (string, bool)
-		wantErr bool
+		name                string
+		propertyName        string
+		keyNodeValue        string
+		valueNode           *yaml.Node
+		hasImplicitOptional bool
+		wantErr             bool
+		check               func(PatternProperty)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				fragmentsCache:          map[string]Fragment{},
-				fragmentTypes:           map[string]map[string]*BaseShape{},
-				fragmentAnnotationTypes: map[string]map[string]*BaseShape{},
-				entryPoint:              &Library{},
-				domainExtensions:        []*DomainExtension{},
-				shapes:                  []*BaseShape{},
-				unresolvedShapes:        list.List{},
-				ctx:                     context.Background(),
-			},
-			args: args{
-				nodeName:     "pattern",
-				propertyName: "/^pattern*/",
-				v: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "string",
-					Tag:   "!!str",
-				},
-				location:            "location",
-				hasImplicitOptional: false,
-			},
-			want: func(got PatternProperty) (string, bool) {
-				if !got.Pattern.MatchString("pattern") {
-					return "Pattern hasn't been set correctly", false
+			name:         "valid pattern property string type",
+			propertyName: "/^prefix.*/",
+			keyNodeValue: "name",
+			valueNode:    &yaml.Node{Kind: yaml.ScalarNode, Value: "string", Tag: "!!str"},
+			check: func(pp PatternProperty) {
+				if !pp.Pattern.MatchString("prefixABC") {
+					t.Error("Pattern does not match expected string")
 				}
-				if _, ok := got.Base.Shape.(*StringShape); !ok {
-					return "Shape hasn't been set correctly", false
+				if _, ok := pp.Base.Shape.(*StringShape); !ok {
+					t.Errorf("Shape type = %T, want *StringShape", pp.Base.Shape)
 				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: make shape error",
-			fields: fields{
-				fragmentsCache:          map[string]Fragment{},
-				fragmentTypes:           map[string]map[string]*BaseShape{},
-				fragmentAnnotationTypes: map[string]map[string]*BaseShape{},
-				entryPoint:              &Library{},
-				domainExtensions:        []*DomainExtension{},
-				shapes:                  []*BaseShape{},
-				unresolvedShapes:        list.List{},
-				ctx:                     context.Background(),
-			},
-			args: args{
-				nodeName:     "pattern",
-				propertyName: "/^pattern*/",
-				v: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "string",
-					Tag:   "!!int",
-				},
-			},
-			wantErr: true,
+			name:         "required facet on pattern property is rejected",
+			propertyName: "/^prefix.*/",
+			keyNodeValue: "name",
+			valueNode:    &yaml.Node{Kind: yaml.ScalarNode, Value: "string", Tag: "!!int"},
+			wantErr:      true,
 		},
 		{
-			name: "negative case: compile regexp pattern error",
-			fields: fields{
-				fragmentsCache:          map[string]Fragment{},
-				fragmentTypes:           map[string]map[string]*BaseShape{},
-				fragmentAnnotationTypes: map[string]map[string]*BaseShape{},
-				entryPoint:              &Library{},
-				domainExtensions:        []*DomainExtension{},
-				shapes:                  []*BaseShape{},
-				unresolvedShapes:        list.List{},
-				ctx:                     context.Background(),
-			},
-			args: args{
-				nodeName:     "pattern",
-				propertyName: "/[a-z/",
-				v: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "string",
-					Tag:   "!!str",
-				},
-			},
-			wantErr: true,
+			name:                "implicit-optional flag on pattern property is rejected",
+			propertyName:        "/^prefix.*/",
+			keyNodeValue:        "name",
+			valueNode:           &yaml.Node{Kind: yaml.ScalarNode, Value: "string", Tag: "!!str"},
+			hasImplicitOptional: true,
+			wantErr:             true,
+		},
+		{
+			name:         "invalid regex pattern returns error",
+			propertyName: "/[unclosed/",
+			keyNodeValue: "name",
+			valueNode:    &yaml.Node{Kind: yaml.ScalarNode, Value: "string", Tag: "!!str"},
+			wantErr:      true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &RAML{
-				fragmentsCache:          tt.fields.fragmentsCache,
-				fragmentTypes:           tt.fields.fragmentTypes,
-				fragmentAnnotationTypes: tt.fields.fragmentAnnotationTypes,
-				entryPoint:              tt.fields.entryPoint,
-				domainExtensions:        tt.fields.domainExtensions,
-				shapes:                  tt.fields.shapes,
-				unresolvedShapes:        tt.fields.unresolvedShapes,
-				ctx:                     tt.fields.ctx,
-			}
-			got, err := r.makePatternProperty(tt.args.nodeName, tt.args.propertyName, tt.args.v, tt.args.location, tt.args.hasImplicitOptional)
+			r := makeTestRAML(t)
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: tt.keyNodeValue}
+			got, err := r.makePatternProperty(tt.propertyName, keyNode, tt.valueNode, "test.raml", tt.hasImplicitOptional)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("makePatternProperty() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestRAML_chompImplicitOptional verifies optional-marker detection on property names.
 func TestRAML_chompImplicitOptional(t *testing.T) {
-	type fields struct {
-		fragmentsCache          map[string]Fragment
-		fragmentTypes           map[string]map[string]*BaseShape
-		fragmentAnnotationTypes map[string]map[string]*BaseShape
-		entryPoint              Fragment
-		domainExtensions        []*DomainExtension
-		shapes                  []*BaseShape
-		unresolvedShapes        list.List
-		ctx                     context.Context
-	}
-	type args struct {
-		nodeName string
-	}
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   string
-		want1  bool
+		name         string
+		input        string
+		wantName     string
+		wantOptional bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				fragmentsCache:          map[string]Fragment{},
-				fragmentTypes:           map[string]map[string]*BaseShape{},
-				fragmentAnnotationTypes: map[string]map[string]*BaseShape{},
-				entryPoint:              &Library{},
-				domainExtensions:        []*DomainExtension{},
-				shapes:                  []*BaseShape{},
-				unresolvedShapes:        list.List{},
-				ctx:                     context.Background(),
-			},
-			args: args{
-				nodeName: "string?",
-			},
-			want:  "string",
-			want1: true,
+			name:         "name ending with '?' is optional",
+			input:        "property?",
+			wantName:     "property",
+			wantOptional: true,
+		},
+		{
+			name:         "name without '?' is not optional",
+			input:        "property",
+			wantName:     "property",
+			wantOptional: false,
+		},
+		{
+			name:         "empty string stays empty, not optional",
+			input:        "",
+			wantName:     "",
+			wantOptional: false,
+		},
+		{
+			name:         "only '?' is consumed and marked optional",
+			input:        "?",
+			wantName:     "",
+			wantOptional: true,
+		},
+		{
+			name:         "double '??' — only trailing '?' stripped",
+			input:        "name??",
+			wantName:     "name?",
+			wantOptional: true,
+		},
+		{
+			name:         "'?' in the middle — not stripped",
+			input:        "na?me",
+			wantName:     "na?me",
+			wantOptional: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &RAML{
-				fragmentsCache:          tt.fields.fragmentsCache,
-				fragmentTypes:           tt.fields.fragmentTypes,
-				fragmentAnnotationTypes: tt.fields.fragmentAnnotationTypes,
-				entryPoint:              tt.fields.entryPoint,
-				domainExtensions:        tt.fields.domainExtensions,
-				shapes:                  tt.fields.shapes,
-				unresolvedShapes:        tt.fields.unresolvedShapes,
-				ctx:                     tt.fields.ctx,
+			gotName, gotOptional := chompImplicitOptional(tt.input)
+			if gotName != tt.wantName {
+				t.Errorf("chompImplicitOptional() name = %q, want %q", gotName, tt.wantName)
 			}
-			got, got1 := r.chompImplicitOptional(tt.args.nodeName)
-			if got != tt.want {
-				t.Errorf("chompImplicitOptional() got = %v, want %v", got, tt.want)
-			}
-			if got1 != tt.want1 {
-				t.Errorf("chompImplicitOptional() got1 = %v, want %v", got1, tt.want1)
+			if gotOptional != tt.wantOptional {
+				t.Errorf("chompImplicitOptional() optional = %v, want %v", gotOptional, tt.wantOptional)
 			}
 		})
 	}
 }
 
+// TestRAML_makeProperty verifies property creation including name/required resolution.
 func TestRAML_makeProperty(t *testing.T) {
-	type fields struct {
-		fragmentsCache          map[string]Fragment
-		fragmentTypes           map[string]map[string]*BaseShape
-		fragmentAnnotationTypes map[string]map[string]*BaseShape
-		entryPoint              Fragment
-		domainExtensions        []*DomainExtension
-		shapes                  []*BaseShape
-		unresolvedShapes        list.List
-		ctx                     context.Context
+	strTypeNode := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "type", Tag: "!!str"},
+		{Kind: yaml.ScalarNode, Value: "string", Tag: "!!str"},
+	}}
+	withRequired := func(required string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "type", Tag: "!!str"},
+			{Kind: yaml.ScalarNode, Value: "string", Tag: "!!str"},
+			{Kind: yaml.ScalarNode, Value: "required", Tag: "!!str"},
+			{Kind: yaml.ScalarNode, Value: required, Tag: "!!bool"},
+		}}
 	}
-	type args struct {
-		nodeName            string
-		propertyName        string
-		v                   *yaml.Node
-		location            string
-		hasImplicitOptional bool
-	}
+
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Property) (string, bool)
-		wantErr bool
+		name                string
+		keyNodeValue        string
+		propertyName        string
+		valueNode           *yaml.Node
+		hasImplicitOptional bool
+		wantErr             bool
+		check               func(Property)
 	}{
 		{
-			name: "positive case with implicit optional name",
-			fields: fields{
-				fragmentsCache:          map[string]Fragment{},
-				fragmentTypes:           map[string]map[string]*BaseShape{},
-				fragmentAnnotationTypes: map[string]map[string]*BaseShape{},
-				entryPoint:              &Library{},
-				domainExtensions:        []*DomainExtension{},
-				shapes:                  []*BaseShape{},
-				unresolvedShapes:        list.List{},
-				ctx:                     context.Background(),
-			},
-			args: args{
-				nodeName:     "property?",
-				propertyName: "property?",
-				v: &yaml.Node{
-					Kind: yaml.MappingNode,
-					Content: []*yaml.Node{
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "type",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "string",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "required",
-							Tag:   "!!str",
-						},
-						{
-							Kind:  yaml.ScalarNode,
-							Value: "false",
-							Tag:   "!!bool",
-						},
-					},
-				},
-				location:            "location",
-				hasImplicitOptional: true,
-			},
-			want: func(got Property) (string, bool) {
-				if got.Name != "property?" {
-					return "Name hasn't been set correctly", false
+			name:         "explicit name, no '?', defaults to required",
+			keyNodeValue: "address",
+			propertyName: "address",
+			valueNode:    strTypeNode,
+			check: func(p Property) {
+				if p.Name != "address" {
+					t.Errorf("Name = %q, want %q", p.Name, "address")
 				}
-				if _, ok := got.Base.Shape.(*StringShape); !ok {
-					return "Shape hasn't been set correctly", false
+				if !p.Required {
+					t.Error("Required = false, want true")
 				}
-				return "", true
 			},
+		},
+		{
+			name:                "name with '?' and hasImplicitOptional=true — chomped, not required",
+			keyNodeValue:        "nick?",
+			propertyName:        "nick",
+			valueNode:           strTypeNode,
+			hasImplicitOptional: true,
+			check: func(p Property) {
+				if p.Name != "nick" {
+					t.Errorf("Name = %q, want %q", p.Name, "nick")
+				}
+				if p.Required {
+					t.Error("Required = true, want false")
+				}
+			},
+		},
+		{
+			name:                "explicit required=false overrides implicit optional — name kept raw",
+			keyNodeValue:        "tag?",
+			propertyName:        "tag",
+			valueNode:           withRequired("false"),
+			hasImplicitOptional: true,
+			check: func(p Property) {
+				// When hasImplicitOptional AND shape explicitly sets required,
+				// node name (with '?') is kept as finalName.
+				if p.Required {
+					t.Error("Required = true, want false")
+				}
+			},
+		},
+		{
+			name:         "required=true in shape",
+			keyNodeValue: "id",
+			propertyName: "id",
+			valueNode:    withRequired("true"),
+			check: func(p Property) {
+				if !p.Required {
+					t.Error("Required = false, want true")
+				}
+			},
+		},
+		{
+			name:         "invalid YAML shape returns error",
+			keyNodeValue: "bad",
+			propertyName: "bad",
+			valueNode:    &yaml.Node{Kind: yaml.ScalarNode, Value: "string", Tag: "!!int"},
+			wantErr:      true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &RAML{
-				fragmentsCache:          tt.fields.fragmentsCache,
-				fragmentTypes:           tt.fields.fragmentTypes,
-				fragmentAnnotationTypes: tt.fields.fragmentAnnotationTypes,
-				entryPoint:              tt.fields.entryPoint,
-				domainExtensions:        tt.fields.domainExtensions,
-				shapes:                  tt.fields.shapes,
-				unresolvedShapes:        tt.fields.unresolvedShapes,
-				ctx:                     tt.fields.ctx,
-			}
-			got, err := r.makeProperty(tt.args.nodeName, tt.args.propertyName, tt.args.v, tt.args.location, tt.args.hasImplicitOptional)
+			r := makeTestRAML(t)
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: tt.keyNodeValue}
+			got, err := r.makeProperty(keyNode, tt.valueNode, tt.propertyName, "test.raml", tt.hasImplicitOptional)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("makeProperty() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestUnionShape_clone verifies that clone copies AnyOf members into a new UnionShape.
 func TestUnionShape_clone(t *testing.T) {
-	type fields struct {
-		NoScalarShape noScalarShape
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		UnionFacets   UnionFacets
+	members := []*BaseShape{
+		NewLinkedBase(&StringShape{}, &BaseShape{ID: 2}),
+		NewLinkedBase(&NumberShape{}, &BaseShape{ID: 3}),
 	}
-	type args struct {
-		base      *BaseShape
-		clonedMap map[int64]*BaseShape
+	s := &UnionShape{
+		BaseShape:   &BaseShape{ID: 1},
+		UnionFacets: UnionFacets{AnyOf: members},
 	}
-	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   func(got Shape) (string, bool)
-	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							ID:    2,
-							Shape: &StringShape{},
-						},
-						{
-							ID:    3,
-							Shape: &NumberShape{},
-						},
-					},
-				},
-			},
-			args: args{
-				base: &BaseShape{
-					ID: 4,
-				},
-				clonedMap: map[int64]*BaseShape{},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*UnionShape)
-				if !ok {
-					return "Shape hasn't been inherited", false
-				}
-				if s.AnyOf == nil {
-					return "AnyOf hasn't been inherited", false
-				}
-				if len(s.AnyOf) != 2 {
-					return "AnyOf hasn't been inherited correctly", false
-				}
-				return "", true
-			},
-		},
+	got := s.clone(&BaseShape{ID: 10}, make(map[int64]*BaseShape))
+	u, ok := got.(*UnionShape)
+	if !ok {
+		t.Fatalf("clone() type = %T, want *UnionShape", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &UnionShape{
-				noScalarShape: tt.fields.NoScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				UnionFacets:   tt.fields.UnionFacets,
-			}
-			got := s.clone(tt.args.base, tt.args.clonedMap)
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
-			}
-		})
+	if len(u.AnyOf) != 2 {
+		t.Errorf("AnyOf len = %d, want 2", len(u.AnyOf))
 	}
 }
 
+// TestUnionShape_validate verifies that at least one AnyOf variant must match.
 func TestUnionShape_validate(t *testing.T) {
-	type fields struct {
-		NoScalarShape noScalarShape
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		UnionFacets   UnionFacets
-	}
-	type args struct {
-		v       interface{}
-		ctxPath string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		anyOf   []*BaseShape
+		v       any
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							Shape: &NumberShape{},
-						},
-						{
-							Shape: &StringShape{},
-						},
-					},
-				},
+			name: "value matches second union member",
+			anyOf: []*BaseShape{
+				NewLinkedBase(&NumberShape{}, &BaseShape{ID: 2}),
+				NewLinkedBase(&StringShape{}, &BaseShape{ID: 3}),
 			},
-			args: args{
-				v: "string",
-			},
+			v: "hello",
 		},
 		{
-			name: "negative case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							Shape: &NumberShape{},
-						},
-					},
-				},
+			name: "value matches no union member",
+			anyOf: []*BaseShape{
+				{Shape: &NumberShape{}},
 			},
-			args: args{
-				v: "string",
-			},
+			v:       "not-a-number",
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &UnionShape{
-				noScalarShape: tt.fields.NoScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				UnionFacets:   tt.fields.UnionFacets,
+				BaseShape:   &BaseShape{ID: 1},
+				UnionFacets: UnionFacets{AnyOf: tt.anyOf},
 			}
-			if err := s.validate(tt.args.v, tt.args.ctxPath); (err != nil) != tt.wantErr {
+			if err := s.validate(tt.v, ""); (err != nil) != tt.wantErr {
 				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// TestUnionShape_inherit verifies union member covariance during inheritance.
 func TestUnionShape_inherit(t *testing.T) {
-	type fields struct {
-		noScalarShape noScalarShape
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		UnionFacets   UnionFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
+		name        string
+		targetAnyOf []*BaseShape
+		source      Shape
+		wantErr     bool
+		check       func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID:   1,
-					raml: New(context.Background()),
-				},
+			name: "compatible members — intersection kept",
+			targetAnyOf: []*BaseShape{
+				{ID: 2, Shape: &StringShape{}},
+			},
+			source: &UnionShape{
+				BaseShape: &BaseShape{ID: 3},
 				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							ID:    2,
-							Shape: &StringShape{},
-						},
-					},
+					AnyOf: []*BaseShape{{ID: 4, Shape: &StringShape{}}},
 				},
 			},
-			args: args{
-				source: &UnionShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-					UnionFacets: UnionFacets{
-						AnyOf: []*BaseShape{
-							{
-								ID:    4,
-								Shape: &StringShape{},
-							},
-						},
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*UnionShape)
-				if !ok {
-					return "Shape hasn't been inherited", false
+			check: func(got Shape) {
+				u := got.(*UnionShape)
+				if len(u.AnyOf) != 1 {
+					t.Errorf("AnyOf len = %d, want 1", len(u.AnyOf))
 				}
-				if s.AnyOf == nil {
-					return "AnyOf hasn't been inherited", false
-				}
-				if len(s.AnyOf) != 1 {
-					return "AnyOf hasn't been inherited correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "positive case: count of AnyOf is 0",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{},
-				},
-			},
-			args: args{
-				source: &UnionShape{
-					BaseShape: &BaseShape{},
-				},
-			},
+			name:        "empty target AnyOf — source takes over",
+			targetAnyOf: []*BaseShape{},
+			source:      &UnionShape{BaseShape: &BaseShape{}},
 		},
 		{
-			name: "negative case: cannot inherit with different types",
-			fields: fields{
-				BaseShape: &BaseShape{ID: 1},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{ID: 2},
-				},
-			},
+			name:    "incompatible source type returns error",
+			source:  &StringShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 		{
-			name: "negative case: failed to find compatible union member",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID:   1,
-					raml: New(context.Background()),
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							ID: 2,
-							Shape: &StringShape{
-								BaseShape: &BaseShape{},
-							},
-						},
-					},
-				},
+			name: "no compatible member found",
+			targetAnyOf: []*BaseShape{
+				{ID: 2, Shape: &StringShape{BaseShape: &BaseShape{}}},
 			},
-			args: args{
-				source: &UnionShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-					UnionFacets: UnionFacets{
-						AnyOf: []*BaseShape{
-							{
-								ID: 4,
-								Shape: &NumberShape{
-									BaseShape: &BaseShape{},
-								},
-							},
-						},
-					},
+			source: &UnionShape{
+				BaseShape: &BaseShape{ID: 3},
+				UnionFacets: UnionFacets{
+					AnyOf: []*BaseShape{{ID: 4, Shape: &NumberShape{BaseShape: &BaseShape{}}}},
 				},
 			},
 			wantErr: true,
@@ -3864,81 +1782,45 @@ func TestUnionShape_inherit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			r := makeTestRAML(t)
+			base := makeTestBase(t, r, "u")
 			s := &UnionShape{
-				noScalarShape: tt.fields.noScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				UnionFacets:   tt.fields.UnionFacets,
+				BaseShape:   base,
+				UnionFacets: UnionFacets{AnyOf: tt.targetAnyOf},
 			}
-			got, err := s.inherit(tt.args.source)
+			got, err := s.inherit(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestUnionShape_check verifies structural self-consistency of UnionFacets.
 func TestUnionShape_check(t *testing.T) {
-	type fields struct {
-		noScalarShape noScalarShape
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		UnionFacets   UnionFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		anyOf   []*BaseShape
 		wantErr bool
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							Shape: &StringShape{},
-						},
-					},
-				},
-			},
+			name:  "all members valid",
+			anyOf: []*BaseShape{NewLinkedBase(&StringShape{}, &BaseShape{ID: 2})},
 		},
 		{
-			name: "negative case: invalid string anyOf shape",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							Shape: &StringShape{
-								BaseShape: &BaseShape{
-									Position: stacktrace.Position{},
-								},
-								// minLength must be less than or equal to maxLength
-								StringFacets: StringFacets{
-									LengthFacets: LengthFacets{
-										MinLength: func() *uint64 {
-											i := uint64(10)
-											return &i
-										}(),
-										MaxLength: func() *uint64 {
-											i := uint64(5)
-											return &i
-										}(),
-									},
-								},
-							},
-						},
+			name: "invalid member shape fails check",
+			anyOf: []*BaseShape{
+				{
+					Shape: &StringShape{
+						BaseShape: &BaseShape{KeyPos: stacktrace.Position{}},
+						StringFacets: StringFacets{LengthFacets: LengthFacets{
+							MinLength: scalarFacetOf(uint64(10)),
+							MaxLength: scalarFacetOf(uint64(5)),
+						}},
 					},
 				},
 			},
@@ -3948,10 +1830,8 @@ func TestUnionShape_check(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &UnionShape{
-				noScalarShape: tt.fields.noScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				UnionFacets:   tt.fields.UnionFacets,
+				BaseShape:   &BaseShape{ID: 1},
+				UnionFacets: UnionFacets{AnyOf: tt.anyOf},
 			}
 			if err := s.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
@@ -3960,711 +1840,318 @@ func TestUnionShape_check(t *testing.T) {
 	}
 }
 
+// TestJSONShape_inherit verifies JSON schema merging rules.
 func TestJSONShape_inherit(t *testing.T) {
-	type fields struct {
-		noScalarShape noScalarShape
-		BaseShape     *BaseShape
-		Schema        *JSONSchema
-		Raw           string
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		raw     string
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Schema: &JSONSchema{},
-				Raw:    "{}",
-			},
-			args: args{
-				source: &JSONShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					Schema: &JSONSchema{},
-					Raw:    "{}",
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*JSONShape)
-				if !ok {
-					return "Shape hasn't been inherited", false
+			name:   "identical JSON schemas pass",
+			raw:    "{}",
+			source: &JSONShape{BaseShape: &BaseShape{ID: 2}, Raw: "{}"},
+			check: func(got Shape) {
+				if got.(*JSONShape).Raw != "{}" {
+					t.Errorf("Raw = %q, want {}", got.(*JSONShape).Raw)
 				}
-				if s.Schema == nil {
-					return "Schema hasn't been inherited", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Schema: &JSONSchema{},
-				Raw:    "{}",
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
+			name:    "source is wrong type",
+			raw:     "{}",
+			source:  &StringShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 		{
-			name: "negative case: cannot inherit from different JSONSchema",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Schema: &JSONSchema{},
-				Raw:    "{}",
-			},
-			args: args{
-				source: &JSONShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					Schema: &JSONSchema{},
-					Raw:    "[]",
-				},
-			},
+			name:    "differing JSON schemas rejected",
+			raw:     "{}",
+			source:  &JSONShape{BaseShape: &BaseShape{ID: 2}, Raw: "[]"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &JSONShape{
-				noScalarShape: tt.fields.noScalarShape,
-				BaseShape:     tt.fields.BaseShape,
-				Schema:        tt.fields.Schema,
-				Raw:           tt.fields.Raw,
-			}
-			got, err := s.inherit(tt.args.source)
+			s := &JSONShape{BaseShape: &BaseShape{ID: 1}, Raw: tt.raw}
+			got, err := s.inherit(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("Case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestArrayShape_alias verifies that alias replaces ArrayFacets from source.
 func TestArrayShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		ArrayFacets ArrayFacets
+	src := &ArrayShape{
+		BaseShape: &BaseShape{ID: 2},
+		ArrayFacets: ArrayFacets{
+			Items:       &BaseShape{ID: 99},
+			MinItems:    scalarFacetOf(uint64(2)),
+			MaxItems:    scalarFacetOf(uint64(20)),
+			UniqueItems: scalarFacetOf(false),
+		},
 	}
-	type args struct {
-		source Shape
-	}
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		target  *ArrayShape
+		source  Shape
 		wantErr bool
-		want    func(got Shape) (string, bool)
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ArrayFacets: ArrayFacets{
-					Items: &BaseShape{
-						ID: 2,
-					},
-					MinItems: func() *uint64 {
-						i := uint64(1)
-						return &i
-					}(),
-					MaxItems: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-					UniqueItems: func() *bool {
-						b := true
-						return &b
-					}(),
-				},
-			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-					ArrayFacets: ArrayFacets{
-						Items: &BaseShape{
-							ID: 4,
-						},
-						MinItems: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-						MaxItems: func() *uint64 {
-							i := uint64(20)
-							return &i
-						}(),
-						UniqueItems: func() *bool {
-							b := false
-							return &b
-						}(),
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*ArrayShape)
-				if !ok {
-					return "Shape hasn't been aliased", false
+			name:   "all facets aliased from source",
+			target: NewTestShape(&ArrayShape{}, 1),
+			source: src,
+			check: func(got Shape) {
+				s := got.(*ArrayShape)
+				if s.Items.ID != 99 {
+					t.Errorf("Items.ID = %d, want 99", s.Items.ID)
 				}
-				if s.Items.ID != 4 {
-					return "Items haven't been aliased correctly", false
+				if s.MinItems.Value != 2 {
+					t.Errorf("MinItems.Value = %d, want 2", s.MinItems.Value)
 				}
-				if *s.MinItems != 2 {
-					return "MinItems haven't been aliased correctly", false
+				if s.MaxItems.Value != 20 {
+					t.Errorf("MaxItems.Value = %d, want 20", s.MaxItems.Value)
 				}
-				if *s.MaxItems != 20 {
-					return "MaxItems haven't been aliased correctly", false
+				if s.UniqueItems.Value {
+					t.Error("UniqueItems.Value = true, want false")
 				}
-				if *s.UniqueItems != false {
-					return "UniqueItems haven't been aliased correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ArrayFacets: ArrayFacets{},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
+			name:    "incompatible source type rejected",
+			target:  NewTestShape(&ArrayShape{}, 1),
+			source:  &ObjectShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ArrayShape{
-				BaseShape:   tt.fields.BaseShape,
-				ArrayFacets: tt.fields.ArrayFacets,
-			}
-			got, err := s.alias(tt.args.source)
+			got, err := tt.target.alias(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("alias() got = %v, want %v", msg, ok)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestObjectShape_alias verifies that alias replaces all ObjectFacets from source.
 func TestObjectShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		ObjectFacets ObjectFacets
+	prop := func(id int64) Property {
+		return Property{Name: "p", Base: &BaseShape{ID: id}}
 	}
-	type args struct {
-		source Shape
+	pp := func(id int64) PatternProperty {
+		return PatternProperty{Pattern: regexp.MustCompile("^p.*"), Base: &BaseShape{ID: id}}
 	}
+	src := &ObjectShape{
+		BaseShape: &BaseShape{ID: 99},
+		ObjectFacets: ObjectFacets{
+			Properties:           newPropsMap(propEntry{"p", prop(10)}),
+			PatternProperties:    newPatternPropsMap(patternPropEntry{"/^p.*/", pp(11)}),
+			MinProperties:        scalarFacetOf(uint64(2)),
+			MaxProperties:        scalarFacetOf(uint64(20)),
+			AdditionalProperties: scalarFacetOf(false),
+			Discriminator:        scalarFacetOf("kind"),
+			DiscriminatorValue:   &DataNode{Value: NewScalarNodeValue("cat")},
+		},
+	}
+
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  *ObjectShape
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{
-					Properties: func() *orderedmap.OrderedMap[string, Property] {
-						m := orderedmap.New[string, Property](0)
-						m.Set("property", Property{
-							Name: "property",
-							Base: &BaseShape{
-								ID: 2,
-							},
-						})
-						return m
-					}(),
-					PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-						m := orderedmap.New[string, PatternProperty](0)
-						m.Set("/^pattern*/", PatternProperty{
-							Pattern: regexp.MustCompile("^pattern*"),
-							Base: &BaseShape{
-								ID: 3,
-							},
-						})
-						return m
-					}(),
-					MinProperties: func() *uint64 {
-						i := uint64(1)
-						return &i
-					}(),
-					MaxProperties: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-					AdditionalProperties: func() *bool {
-						b := true
-						return &b
-					}(),
-					Discriminator: func() *string {
-						d := "discriminator"
-						return &d
-					}(),
-					DiscriminatorValue: "value",
-				},
-			},
-			args: args{
-				source: &ObjectShape{
-					BaseShape: &BaseShape{
-						ID: 4,
-					},
-					ObjectFacets: ObjectFacets{
-						Properties: func() *orderedmap.OrderedMap[string, Property] {
-							m := orderedmap.New[string, Property](0)
-							m.Set("property", Property{
-								Name: "property",
-								Base: &BaseShape{
-									ID: 5,
-								},
-							})
-							return m
-						}(),
-						PatternProperties: func() *orderedmap.OrderedMap[string, PatternProperty] {
-							m := orderedmap.New[string, PatternProperty](0)
-							m.Set("/^pattern*/", PatternProperty{
-								Pattern: regexp.MustCompile("^pattern*"),
-								Base: &BaseShape{
-									ID: 6,
-								},
-							})
-							return m
-						}(),
-						MinProperties: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-						MaxProperties: func() *uint64 {
-							i := uint64(20)
-							return &i
-						}(),
-						AdditionalProperties: func() *bool {
-							b := false
-							return &b
-						}(),
-						Discriminator: func() *string {
-							d := "new_discriminator"
-							return &d
-						}(),
-						DiscriminatorValue: "new_value",
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*ObjectShape)
-				if !ok {
-					return "Shape hasn't been aliased", false
+			name:   "all facets aliased from source",
+			target: &ObjectShape{BaseShape: &BaseShape{ID: 1}, ObjectFacets: ObjectFacets{Properties: newPropsMap(propEntry{"p", prop(1)})}},
+			source: src,
+			check: func(got Shape) {
+				s := got.(*ObjectShape)
+				if s.MinProperties.Value != 2 {
+					t.Errorf("MinProperties = %d, want 2", s.MinProperties.Value)
 				}
-				if s.Properties == nil || s.PatternProperties == nil {
-					return "Properties or PatternProperties haven't been aliased", false
+				if s.MaxProperties.Value != 20 {
+					t.Errorf("MaxProperties = %d, want 20", s.MaxProperties.Value)
 				}
-				if *s.MinProperties != 2 || *s.MaxProperties != 20 {
-					return "MinProperties or MaxProperties haven't been aliased correctly", false
+				if s.AdditionalProperties.Value {
+					t.Error("AdditionalProperties = true, want false")
 				}
-				if *s.AdditionalProperties != false {
-					return "AdditionalProperties haven't been aliased correctly", false
+				if s.Discriminator.Value != "kind" {
+					t.Errorf("Discriminator = %q, want kind", s.Discriminator.Value)
 				}
-				if *s.Discriminator != "new_discriminator" {
-					return "Discriminator hasn't been aliased correctly", false
+				if s.DiscriminatorValue.Value.Raw != "cat" {
+					t.Errorf("DiscriminatorValue = %v, want cat", s.DiscriminatorValue.Value.Raw)
 				}
-				if s.DiscriminatorValue != "new_value" {
-					return "DiscriminatorValue hasn't been aliased correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				ObjectFacets: ObjectFacets{},
-			},
-			args: args{
-				source: &ArrayShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
+			name:    "incompatible source type rejected",
+			target:  &ObjectShape{BaseShape: &BaseShape{ID: 1}},
+			source:  &ArrayShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ObjectShape{
-				BaseShape:    tt.fields.BaseShape,
-				ObjectFacets: tt.fields.ObjectFacets,
-			}
-			got, err := s.alias(tt.args.source)
+			got, err := tt.target.alias(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("alias() %v", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
+
+// TestUnionShape_alias verifies that alias replaces AnyOf from source.
 func TestUnionShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape   *BaseShape
-		UnionFacets UnionFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  *UnionShape
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{
-					AnyOf: []*BaseShape{
-						{
-							ID:    2,
-							Shape: &StringShape{},
-						},
-					},
-				},
+			name: "AnyOf replaced from source",
+			target: &UnionShape{
+				BaseShape:   &BaseShape{ID: 1},
+				UnionFacets: UnionFacets{AnyOf: []*BaseShape{{ID: 2, Shape: &StringShape{}}}},
 			},
-			args: args{
-				source: &UnionShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-					UnionFacets: UnionFacets{
-						AnyOf: []*BaseShape{
-							{
-								ID:    4,
-								Shape: &NumberShape{},
-							},
-						},
-					},
-				},
+			source: &UnionShape{
+				BaseShape:   &BaseShape{ID: 3},
+				UnionFacets: UnionFacets{AnyOf: []*BaseShape{{ID: 4, Shape: &NumberShape{}}}},
 			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*UnionShape)
-				if !ok {
-					return "Shape hasn't been aliased", false
+			check: func(got Shape) {
+				u := got.(*UnionShape)
+				if len(u.AnyOf) != 1 || u.AnyOf[0].ID != 4 {
+					t.Errorf("AnyOf[0].ID = %d, want 4", u.AnyOf[0].ID)
 				}
-				if len(s.AnyOf) != 1 || s.AnyOf[0].ID != 4 {
-					return "AnyOf hasn't been aliased correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				UnionFacets: UnionFacets{},
+			name: "incompatible source type rejected",
+			target: &UnionShape{
+				BaseShape: &BaseShape{ID: 1},
 			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
+			source:  &StringShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &UnionShape{
-				BaseShape:   tt.fields.BaseShape,
-				UnionFacets: tt.fields.UnionFacets,
-			}
-			got, err := s.alias(tt.args.source)
+			got, err := tt.target.alias(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("alias() = %v, want %v", msg, "")
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestJSONShape_alias verifies that alias replaces the Raw JSON content from source.
 func TestJSONShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-		Schema    *JSONSchema
-		Raw       string
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  *JSONShape
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Schema: &JSONSchema{},
-				Raw:    "{}",
-			},
-			args: args{
-				source: &JSONShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					Schema: &JSONSchema{},
-					Raw:    "{}",
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*JSONShape)
-				if !ok {
-					return "Shape hasn't been aliased", false
+			name:   "Raw replaced from source",
+			target: &JSONShape{BaseShape: &BaseShape{ID: 1}, Raw: "{}"},
+			source: &JSONShape{BaseShape: &BaseShape{ID: 2}, Raw: `{"type":"string"}`},
+			check: func(got Shape) {
+				if got.(*JSONShape).Raw != `{"type":"string"}` {
+					t.Errorf("Raw = %q, want {\"type\":\"string\"}", got.(*JSONShape).Raw)
 				}
-				if s.Schema == nil {
-					return "Schema hasn't been aliased", false
-				}
-				if s.Raw != "{}" {
-					return "Raw hasn't been aliased correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Schema: &JSONSchema{},
-				Raw:    "{}",
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-				},
-			},
+			name:    "incompatible source type rejected",
+			target:  &JSONShape{BaseShape: &BaseShape{ID: 1}, Raw: "{}"},
+			source:  &StringShape{BaseShape: &BaseShape{ID: 2}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &JSONShape{
-				BaseShape: tt.fields.BaseShape,
-				Schema:    tt.fields.Schema,
-				Raw:       tt.fields.Raw,
-			}
-			got, err := s.alias(tt.args.source)
+			got, err := tt.target.alias(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("alias() = %v, want %v", msg, ok)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}
 }
 
+// TestUnknownShape_alias verifies that UnknownShape always errors on alias.
 func TestUnknownShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-		facets    []*yaml.Node
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "negative case: cannot alias from unknown shape",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				facets: []*yaml.Node{},
-			},
-			args: args{
-				source: &UnknownShape{
-					BaseShape: &BaseShape{
-						ID: 2,
-					},
-					facets: []*yaml.Node{},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &UnknownShape{
-				BaseShape: tt.fields.BaseShape,
-				facets:    tt.fields.facets,
-			}
-			_, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+	s := &UnknownShape{BaseShape: &BaseShape{ID: 1}, facets: []*yaml.Node{}}
+	src := &UnknownShape{BaseShape: &BaseShape{ID: 2}, facets: []*yaml.Node{}}
+	if _, err := s.alias(src); err == nil {
+		t.Error("alias() error = nil, want non-nil")
 	}
 }
 
+// TestRecursiveShape_alias verifies that alias replaces the Head pointer.
 func TestRecursiveShape_alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-		Head      *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
+		target  *RecursiveShape
+		source  Shape
 		wantErr bool
+		check   func(Shape)
 	}{
 		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Head: &BaseShape{
-					ID: 2,
-				},
-			},
-			args: args{
-				source: &RecursiveShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-					Head: &BaseShape{
-						ID: 4,
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				s, ok := got.(*RecursiveShape)
-				if !ok {
-					return "Shape hasn't been aliased", false
+			name:   "Head replaced from source",
+			target: &RecursiveShape{BaseShape: &BaseShape{ID: 1}, Head: &BaseShape{ID: 2}},
+			source: &RecursiveShape{BaseShape: &BaseShape{ID: 3}, Head: &BaseShape{ID: 4}},
+			check: func(got Shape) {
+				if got.(*RecursiveShape).Head.ID != 4 {
+					t.Errorf("Head.ID = %d, want 4", got.(*RecursiveShape).Head.ID)
 				}
-				if s.Head.ID != 4 {
-					return "Head hasn't been aliased correctly", false
-				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: cannot alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					ID: 1,
-				},
-				Head: &BaseShape{
-					ID: 2,
-				},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						ID: 3,
-					},
-				},
-			},
+			name:    "incompatible source type rejected",
+			target:  &RecursiveShape{BaseShape: &BaseShape{ID: 1}, Head: &BaseShape{ID: 2}},
+			source:  &StringShape{BaseShape: &BaseShape{ID: 3}},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &RecursiveShape{
-				BaseShape: tt.fields.BaseShape,
-				Head:      tt.fields.Head,
-			}
-			got, err := s.alias(tt.args.source)
+			got, err := tt.target.alias(tt.source)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(got); !ok {
-					t.Errorf("alias() = %v, %s", got, msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(got)
 			}
 		})
 	}

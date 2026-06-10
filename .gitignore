@@ -7,3 +7,8 @@ cover.out
 .build
 /.idea
 test_output/
+testdata/
+dist/
+bin/
+*.vsix
+*.exe

@@ -1,0 +1,18 @@
+#%RAML 1.0
+title: Custom Facets API
+
+types:
+  ParentWithCustomFacet:
+    facets:
+      myfacet:
+
+  ChildWithFacet:
+    type: ParentWithCustomFacet
+    myfacet: test
+
+  DescendantWithInheritedFacet:
+    type: ChildWithFacet
+
+  DescendantWithOverriddenInheritedFacet:
+    type: ChildWithFacet
+    myfacet: onetwo

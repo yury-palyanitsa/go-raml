@@ -1,115 +1,60 @@
 package raml
 
 import (
-	"container/list"
-	"context"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
+// TestRAML_unmarshalCustomDomainExtension verifies annotation parsing from YAML key/value nodes.
 func TestRAML_unmarshalCustomDomainExtension(t *testing.T) {
-	type fields struct {
-		fragmentsCache          map[string]Fragment
-		fragmentTypes           map[string]map[string]*BaseShape
-		fragmentAnnotationTypes map[string]map[string]*BaseShape
-		entryPoint              Fragment
-		domainExtensions        []*DomainExtension
-		shapes                  []*BaseShape
-		unresolvedShapes        list.List
-		ctx                     context.Context
+	scalar := func(val, tag string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.ScalarNode, Value: val, Tag: tag}
 	}
-	type args struct {
-		location  string
+
+	tests := []struct {
+		name      string
 		keyNode   *yaml.Node
 		valueNode *yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got string, de *DomainExtension) (string, bool)
-		wantErr bool
+		wantErr   bool
+		check     func(*DomainExtension)
 	}{
 		{
-			name: "positive case",
-			args: args{
-				location: "location",
-				keyNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "(name)",
-				},
-				valueNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "value",
-				},
-			},
-			want: func(name string, de *DomainExtension) (string, bool) {
-				if name != "name" {
-					return "name is not equal to 'name'", false
-				}
+			name:      "valid annotation extracts name and value",
+			keyNode:   &yaml.Node{Kind: yaml.ScalarNode, Value: "(name)"},
+			valueNode: scalar("value", ""),
+			check: func(de *DomainExtension) {
 				if de.Name != "name" {
-					return "de.Name is not equal to 'name'", false
+					t.Errorf("Name = %q, want %q", de.Name, "name")
 				}
-				if de.Extension.Value != "value" {
-					return "extension value is not equal to 'value'", false
+				if de.Extension.Value.Raw != "value" {
+					t.Errorf("Extension.Value.Raw = %q, want value", de.Extension.Value.Raw)
 				}
-				return "", true
 			},
 		},
 		{
-			name: "negative case: annotation name must not be empty",
-			args: args{
-				location: "location",
-				keyNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "()",
-				},
-				valueNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "value",
-				},
-			},
-			wantErr: true,
+			name:      "empty annotation name is rejected",
+			keyNode:   &yaml.Node{Kind: yaml.ScalarNode, Value: "()"},
+			valueNode: scalar("value", ""),
+			wantErr:   true,
 		},
 		{
-			name: "negative case: make node error",
-			args: args{
-				location: "location",
-				keyNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "(name)",
-				},
-				valueNode: &yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "value",
-					Tag:   "!!int",
-				},
-			},
-			wantErr: true,
+			name:      "invalid value node tag causes make-node error",
+			keyNode:   &yaml.Node{Kind: yaml.ScalarNode, Value: "(name)"},
+			valueNode: scalar("value", "!!int"),
+			wantErr:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &RAML{
-				fragmentsCache:          tt.fields.fragmentsCache,
-				fragmentTypes:           tt.fields.fragmentTypes,
-				fragmentAnnotationTypes: tt.fields.fragmentAnnotationTypes,
-				entryPoint:              tt.fields.entryPoint,
-				domainExtensions:        tt.fields.domainExtensions,
-				shapes:                  tt.fields.shapes,
-				unresolvedShapes:        tt.fields.unresolvedShapes,
-				ctx:                     tt.fields.ctx,
-			}
-			name, de, err := r.unmarshalCustomDomainExtension(tt.args.location, tt.args.keyNode, tt.args.valueNode)
+			r := makeTestRAML(t)
+			de, err := r.unmarshalCustomDomainExtension("test.raml", tt.keyNode, tt.valueNode)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalCustomDomainExtension() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.want != nil {
-				if msg, ok := tt.want(name, de); !ok {
-					t.Errorf("unmarshalCustomDomainExtension() case hasn't been passed: %s", msg)
-				}
+			if !tt.wantErr && tt.check != nil {
+				tt.check(de)
 			}
 		})
 	}

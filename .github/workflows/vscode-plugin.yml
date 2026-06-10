@@ -1,0 +1,31 @@
+name: VS Code Plugin
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'external/raml-lsp-vscode/**'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'external/raml-lsp-vscode/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Audit dependencies
+      run: cd external/raml-lsp-vscode && npm audit --audit-level=high
+
+    - name: Build
+      run: make build-plugin-vscode

@@ -5,12 +5,12 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"github.com/acronis/go-raml/v2/rdt"
+	"github.com/acronis/go-raml/v3/rdt"
 )
 
 // RdtVisitor defines a struct that implements the visitor
 type RdtVisitor struct {
-	rdt.BaserdtParserVisitor // Embedding the base visitor class
+	rdt.BaseRdtParserVisitor // Embedding the base visitor class
 	raml                     *RAML
 }
 
@@ -30,10 +30,6 @@ func (visitor *RdtVisitor) Visit(tree antlr.ParseTree, target *UnknownShape) (Sh
 		return visitor.VisitType(t, target)
 	case *rdt.PrimitiveContext:
 		return visitor.VisitPrimitive(t, target)
-	case *rdt.OptionalContext:
-		return visitor.VisitOptional(t, target)
-	case *rdt.ArrayContext:
-		return visitor.VisitArray(t, target)
 	case *rdt.UnionContext:
 		return visitor.VisitUnion(t, target)
 	case *rdt.GroupContext:
@@ -52,7 +48,11 @@ func (visitor *RdtVisitor) VisitUnionMembers(node antlr.RuleNode, target *Unknow
 	// ^     ^ ^     ^ ^
 	// 0     1 2     3 4
 	for i := 0; i < len(children); i += 2 {
-		baseResolved, implicitAnonShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.Position)
+		baseResolved, implicitAnonShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.KeyPos, target.ValuePos)
+		baseResolved.anchorFrag = target.anchorFrag
+		// Propagate the type expression origin so VisitReference can compute
+		// each member's file column correctly.
+		baseResolved.TypeExpr = target.Base().TypeExpr
 		s, err := visitor.Visit(children[i].(antlr.ParseTree), implicitAnonShape.(*UnknownShape))
 		if err != nil {
 			return nil, fmt.Errorf("visit children: %w", err)
@@ -73,7 +73,71 @@ func (visitor *RdtVisitor) VisitExpression(ctx *rdt.ExpressionContext, target *U
 }
 
 func (visitor *RdtVisitor) VisitType(ctx *rdt.TypeContext, target *UnknownShape) (Shape, error) {
-	return visitor.Visit(ctx.GetChildren()[0].(antlr.ParseTree), target)
+	children := ctx.GetChildren()
+	if len(children) == 0 {
+		return nil, fmt.Errorf("empty type")
+	}
+
+	// children[0] is the base type, children[1:] are ARRAY_NOTATION/OPTIONAL_NOTATION.
+	// Process notations from left to right, recursively building nested wrappers.
+	// string[][] -> array of array of string
+	// string[]? -> optional array of string
+	return visitor.visitTypeNotation(children, 1, target)
+}
+
+func (visitor *RdtVisitor) visitTypeNotation(children []antlr.Tree, idx int, target *UnknownShape) (Shape, error) {
+	// If we've processed all notations, resolve the base type directly.
+	if idx >= len(children) {
+		return visitor.Visit(children[0].(antlr.ParseTree), target)
+	}
+
+	// This is a notation ([] or ?), create the wrapper and recurse for the rest.
+	term := children[idx].(antlr.TerminalNode)
+	switch term.GetSymbol().GetTokenType() {
+	case rdt.RdtLexerARRAY_NOTATION:
+		// Create new anonymous shape for items and resolve the rest into it.
+		itemsBase, itemsShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.KeyPos, target.ValuePos)
+		itemsBase.anchorFrag = target.anchorFrag
+		itemsBase.TypeExpr = target.Base().TypeExpr
+		innerShape, err := visitor.visitTypeNotation(children, idx+1, itemsShape.(*UnknownShape))
+		if err != nil {
+			return nil, fmt.Errorf("visit array items: %w", err)
+		}
+		itemsBase.SetShape(innerShape)
+
+		// Build the array shape on target's base.
+		arrayShape, err := visitor.raml.MakeConcreteShapeYAML(target.Base(), TypeArray, target.facets)
+		if err != nil {
+			return nil, fmt.Errorf("make array shape: %w", err)
+		}
+		arrayShape.(*ArrayShape).ArrayFacets.Items = itemsBase
+		return arrayShape, nil
+
+	case rdt.RdtLexerOPTIONAL_NOTATION:
+		// Create new anonymous shape for union member and resolve the rest into it.
+		memberBase, memberShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.KeyPos, target.ValuePos)
+		memberBase.anchorFrag = target.anchorFrag
+		memberBase.TypeExpr = target.Base().TypeExpr
+		innerShape, err := visitor.visitTypeNotation(children, idx+1, memberShape.(*UnknownShape))
+		if err != nil {
+			return nil, fmt.Errorf("visit optional member: %w", err)
+		}
+		memberBase.SetShape(innerShape)
+
+		// Build the union shape on target's base.
+		unionShape, err := visitor.raml.MakeConcreteShapeYAML(target.Base(), TypeUnion, target.facets)
+		if err != nil {
+			return nil, fmt.Errorf("make union shape: %w", err)
+		}
+		union := unionShape.(*UnionShape)
+		nilBase, _, _ := visitor.raml.MakeNewShape("", TypeNil, target.Location, target.KeyPos, target.ValuePos)
+		nilBase.anchorFrag = target.anchorFrag
+		union.UnionFacets.AnyOf = []*BaseShape{memberBase, nilBase}
+		return unionShape, nil
+
+	default:
+		return nil, fmt.Errorf("unexpected token at index %d", idx)
+	}
 }
 
 func (visitor *RdtVisitor) VisitPrimitive(ctx *rdt.PrimitiveContext, target *UnknownShape) (Shape, error) {
@@ -81,57 +145,25 @@ func (visitor *RdtVisitor) VisitPrimitive(ctx *rdt.PrimitiveContext, target *Unk
 	if err != nil {
 		return nil, fmt.Errorf("make concrete shape: %w", err)
 	}
+	// Record the exact source position of each primitive type keyword so that
+	// LSP tooling can surface hover documentation at the call site.
+	if target.Base().TypeExpr != nil {
+		startCol := target.Base().TypeExpr.ValuePos.Column + ctx.GetStart().GetColumn()
+		s.Base().TypeExprRefs = append(s.Base().TypeExprRefs, TypeExprRef{
+			Line:        target.Base().TypeExpr.ValuePos.Line,
+			Column:      startCol,
+			BuiltinType: ctx.GetText(),
+		})
+	}
 	return s, nil
 }
 
-func (visitor *RdtVisitor) VisitOptional(ctx *rdt.OptionalContext, target *UnknownShape) (Shape, error) {
-	// Resolve target shape into union shape since this is the base.
-	shape, err := visitor.raml.MakeConcreteShapeYAML(target.Base(), TypeUnion, target.facets)
-	if err != nil {
-		return nil, fmt.Errorf("make concrete shape yaml: %w", err)
-	}
-	//nolint:errcheck // No error check needed because MakeConcreteShapeYAML returns UnionShape for TypeUnion.
-	unionShape := shape.(*UnionShape)
-
-	// Create new anonymous shape for union member and continue resolving the expression for it.
-	baseResolved, anonResolvedShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.Position)
-	s, err := visitor.Visit(ctx.GetChildren()[0].(antlr.ParseTree), anonResolvedShape.(*UnknownShape))
-	if err != nil {
-		return nil, fmt.Errorf("visit: %w", err)
-	}
-	// Replace with resolved shape
-	baseResolved.SetShape(s)
-
-	// Nil shape is also anonymous here and doesn't share the base shape with the target.
-	baseNil, _, _ := visitor.raml.MakeNewShape("", TypeNil, target.Location, target.Position)
-
-	unionShape.UnionFacets.AnyOf = []*BaseShape{baseResolved, baseNil}
-	return unionShape, nil
-}
-
-func (visitor *RdtVisitor) VisitArray(ctx *rdt.ArrayContext, target *UnknownShape) (Shape, error) {
-	// Resolve target shape into array shape since this is the base.
-	shape, err := visitor.raml.MakeConcreteShapeYAML(target.Base(), TypeArray, target.facets)
-	if err != nil {
-		return nil, fmt.Errorf("make concrete shape yaml: %w", err)
-	}
-	//nolint:errcheck // No error check needed because MakeConcreteShapeYAML returns ArrayShape for TypeArray.
-	arrayShape := shape.(*ArrayShape)
-
-	// Create new anonymous shape for items and continue resolving the expression for it.
-	itemsBase, itemsShape, _ := visitor.raml.MakeNewShape("", "", target.Location, target.Position)
-	itemsShape, err = visitor.Visit(ctx.GetChildren()[0].(antlr.ParseTree), itemsShape.(*UnknownShape))
-	if err != nil {
-		return nil, fmt.Errorf("visit: %w", err)
-	}
-	// Replace with resolved shape
-	itemsBase.SetShape(itemsShape)
-
-	arrayShape.ArrayFacets.Items = itemsBase
-	return arrayShape, nil
-}
-
 func (visitor *RdtVisitor) VisitUnion(ctx *rdt.UnionContext, target *UnknownShape) (Shape, error) {
+	children := ctx.GetChildren()
+	// Single type -> not actually a union
+	if len(children) == 1 {
+		return visitor.Visit(children[0].(antlr.ParseTree), target)
+	}
 	// Resolve target shape into union shape since this is the base.
 	shape, err := visitor.raml.MakeConcreteShapeYAML(target.Base(), TypeUnion, target.facets)
 	if err != nil {
@@ -159,7 +191,29 @@ func (visitor *RdtVisitor) VisitGroup(ctx *rdt.GroupContext, target *UnknownShap
 
 func (visitor *RdtVisitor) VisitReference(ctx *rdt.ReferenceContext, target *UnknownShape) (Shape, error) {
 	shapeType := ctx.GetText()
-	ref, err := visitor.raml.GetReferencedType(shapeType, target.Location)
+
+	// Both qualified (lib.TypeName) and unqualified references resolve via the
+	// anchor fragment captured at shape creation time. anchorFrag is the lexical
+	// scope established via the ParseCtx stack (and, for shapes materialized from
+	// stage-1 grafted trait/RT bodies, via the provenance overlay): it is the
+	// fragment whose uses: governs both bare names and the "lib." prefix. The
+	// physical-location fallback covers shapes built without a parse context
+	// (e.g. unwrap-time clones, tests using a bare BaseShape).
+	var ref *BaseShape
+	var err error
+	if target.anchorFrag != nil {
+		if target.IsAnnotationType {
+			ref, err = target.anchorFrag.GetReferenceAnnotationType(shapeType)
+		} else {
+			ref, err = target.anchorFrag.GetReferenceType(shapeType)
+		}
+	} else {
+		if target.IsAnnotationType {
+			ref, err = visitor.raml.GetReferencedAnnotationType(shapeType, target.Location)
+		} else {
+			ref, err = visitor.raml.GetReferencedType(shapeType, target.Location)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get referenced shape: %w", err)
 	}
@@ -174,11 +228,41 @@ func (visitor *RdtVisitor) VisitReference(ctx *rdt.ReferenceContext, target *Unk
 		return nil, fmt.Errorf("make concrete shape: %w", err)
 	}
 	// If target.facets is nil (makeNewShapeYAML returned nil instead of empty array) then reference is an alias.
-	s.Base().TypeLabel = shapeType
 	if target.facets == nil {
 		s.Base().Alias = ref
 	} else {
 		s.Base().Inherits = append(s.Base().Inherits, ref)
+	}
+	// Record the exact source position(s) of this type-name reference so LSP tooling
+	// can provide go-to-definition and hover at the exact reference site.
+	// ANTLR column is 0-based within the expression string; TypeExprCol is the file
+	// column of the expression's first character (1-based).
+	if target.Base().TypeExpr != nil {
+		startCol := target.Base().TypeExpr.ValuePos.Column + ctx.GetStart().GetColumn()
+		if prefix, _, found := CutReferenceName(shapeType); found {
+			// Qualified reference "lib.TypeName": emit one ref for the library
+			// prefix (navigates to the library file) and one for the type name
+			// (navigates to the type definition).
+			if libLink := visitor.raml.GetLibraryLinkByPrefix(prefix, target.Location); libLink != nil {
+				s.Base().TypeExprRefs = append(s.Base().TypeExprRefs, TypeExprRef{
+					Line:         target.Base().TypeExpr.ValuePos.Line,
+					Column:       startCol,
+					LibraryLink:  libLink,
+					LibraryAlias: prefix,
+				})
+			}
+			s.Base().TypeExprRefs = append(s.Base().TypeExprRefs, TypeExprRef{
+				Line:     target.Base().TypeExpr.ValuePos.Line,
+				Column:   startCol + len(prefix) + 1, // +1 for the "."
+				Resolved: ref,
+			})
+		} else {
+			s.Base().TypeExprRefs = append(s.Base().TypeExprRefs, TypeExprRef{
+				Line:     target.Base().TypeExpr.ValuePos.Line,
+				Column:   startCol,
+				Resolved: ref,
+			})
+		}
 	}
 	return s, nil
 }

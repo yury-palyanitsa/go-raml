@@ -7,7 +7,7 @@
 > The parser is in active development. See supported features in the **Supported features of RAML 1.0 specification**
 > section.
 
-This is an implementation of RAML parser for Go according to 
+This is an implementation of RAML parser for Go according to
 [the official RAML 1.0 specification](https://github.com/raml-org/raml-spec/blob/master/versions/raml-10/raml-10.md/).
 
 This package aims to achieve the following:
@@ -92,7 +92,7 @@ types:
       name: string
       email: string
       age: integer
-  
+
   Organization:
     properties:
       id: integer
@@ -100,20 +100,20 @@ types:
       address: string
 
 /users:
-  type: 
+  type:
     BatchCollection:
       entityType: User
   /{user_id}:
-    type: 
+    type:
       ItemCollection:
         entityType: User
 
 /organizations:
-  type: 
+  type:
     BatchCollection:
       entityType: Organization
   /{organization_id}:
-    type: 
+    type:
       ItemCollection:
         entityType: Organization
 ```
@@ -231,74 +231,81 @@ With all these features, more creative cases can be covered than the use cases m
 
 The following sections are currently implemented. See notes for each point:
 
-- [ ] RAML API definitions
+- [x] RAML API definitions
+  - [x] Resource Types
+  - [x] Traits
+  - [x] Endpoint definitions
+  - [x] Security schemes
+  - [x] Documentation
 - [x] RAML Data Types
-    - [x] Defining Types
-    - [x] Type Declarations
-    - [x] Built-in Types
-        - [x] The "Any" Type
-        - [x] Object Type
-            - [x] Property Declarations (explicit and pattern properties)
-            - [x] Additional Properties
-            - [x] Object Type Specialization
-            - [x] Using Discriminator
-        - [x] Array Type
-        - [x] Scalar Types
-            - [x] String
-            - [x] Number
-            - [x] Integer
-            - [x] Boolean
-            - [x] Date
-            - [x] File
-            - [x] Nil Type
-        - [x] Union Type (mostly supported, lacks enum support)
-        - [x] JSON Schema types (supported, but validation is not implemented)
-        - [x] Recursive types
-    - [x] User-defined Facets
-    - [x] Determine Default Types
-    - [x] Type Expressions
-    - [x] Type Inheritance
-    - [ ] Multiple Inheritance (supported, but not fully compliant)
-    - [x] Inline Type Declarations
-    - [x] Defining Examples in RAML
-        - [x] Multiple Examples
-        - [x] Single Example
-        - [x] Validation against defined data type
+  - [x] Defining Types
+  - [x] Type Declarations
+  - [x] Built-in Types
+    - [x] The "Any" Type
+    - [x] Object Type
+      - [x] Property Declarations (explicit and pattern properties)
+      - [x] Additional Properties
+      - [x] Object Type Specialization
+      - [x] Using Discriminator
+    - [x] Array Type
+    - [x] Scalar Types
+      - [x] String
+      - [x] Number
+      - [x] Integer
+      - [x] Boolean
+      - [x] Date
+      - [x] File
+      - [x] Nil Type
+    - [x] Union Type (mostly supported, lacks enum support)
+    - [x] JSON Schema types
+    - [x] Recursive types
+  - [x] User-defined Facets
+  - [x] Determine Default Types
+  - [x] Type Expressions
+  - [x] Type Inheritance
+  - [x] Multiple Inheritance
+  - [x] Inline Type Declarations
+  - [x] Defining Examples in RAML
+    - [x] Multiple Examples
+    - [x] Single Example
+    - [x] Validation against defined data type
 - [ ] Annotations
-    - [x] Declaring Annotation Types
-    - [ ] Applying Annotations
-        - [ ] Annotating Scalar-valued Nodes
-        - [ ] Annotation Targets
-        - [x] Annotating types
+  - [x] Declaring Annotation Types
+  - [ ] Applying Annotations
+    - [x] Annotating Scalar-valued Nodes
+    - [ ] Annotation Targets
+    - [x] Annotating types
 - [ ] Modularization
-    - [ ] Includes
-        - [x] Library
-            - [x] NamedExample
-            - [x] DataType
-            - [ ] AnnotationTypeDeclaration
-            - [ ] DocumentationItem
-            - [ ] ResourceType
-            - [ ] Trait
-            - [ ] Overlay
-            - [ ] Extension
-            - [ ] SecurityScheme
-- [ ] Conversion
-    - [x] Conversion to JSON Schema
-    - [ ] Conversion to RAML
-- [ ] CLI
-    - [x] Validate
-    - [ ] Convert to JSON Schema
+  - [x] Includes
+  - [ ] Typed fragments
+    - [x] Library
+    - [x] NamedExample
+    - [x] DataType
+    - [x] AnnotationTypeDeclaration
+    - [x] DocumentationItem
+    - [x] ResourceType
+    - [x] Trait
+    - [ ] Overlay
+    - [ ] Extension
+    - [x] SecurityScheme
+
+## Conversion features
+
+- [x] Data type conversion from RAML Data Type to JSON Schema
+- [x] Data type conversion from JSON Schema to RAML Data Type
+- [x] Conversion to [AMF Graph model](https://github.com/aml-org/amf/blob/develop/documentation/model.md)
+- [x] Conversion to OpenAPI 3.0 (API and data type)
 
 ## Comparison with existing libraries
 
 ### Table of libraries
 
-| Parser                 | RAML 1.0 support      | Language         |
-|------------------------|-----------------------|------------------|
-| AML Modeling Framework | Yes (full support)    | Scala/TypeScript |
-| raml-js-parser         | Yes                   | TypeScript       |
-| ramlfications          | No                    | Python           |
-| go-raml                | Yes (partial support) | Go               |
+| Parser                                                         | RAML 1.0 support      | Language         |
+|----------------------------------------------------------------|-----------------------|------------------|
+| [AML Modeling Framework](https://github.com/aml-org/amf)       | Yes (full support)    | Scala/TypeScript |
+| [raml-js-parser](https://github.com/raml-org/raml-js-parser-2) | Yes                   | TypeScript       |
+| [ramlfications](https://github.com/jdiegodcp/ramlfications)    | No                    | Python           |
+| go-raml                                                        | Yes (partial support) | Go               |
 
 ### Performance
 
@@ -316,23 +323,349 @@ Simple project (<100 types, 1 library)
 | go-raml                     | ~4ms       | ~12MB     |
 | AML Modeling Framework (TS) | ~2s        | ~100MB    |
 
+## Known Spec Deviations
+
+### Supported JSON Schema Drafts
+
+Supported JSON Schema Drafts are limited to what is supported
+by [santhosh-tekuri/jsonschema](https://github.com/santhosh-tekuri/jsonschema) library.
+
+### XML Schema (XSD) — Not Supported
+
+XSD external types referenced via `!include foo.xsd` are not supported.
+RAML allows XSD as an external type for body schemas; users targeting that
+feature should pre-convert their XSDs to JSON Schema or RAML data types.
+
+### Numeric type formats are not cross-compatible
+
+The RAML 1.0 spec states that `integer` inherits all facets from `number`, implying that all 8 format values (`int8`, `int16`, `int32`, `int`, `int64`, `long`, `float`, `double`) are valid for both types. This library deliberately rejects that:
+
+- `number` only accepts `float` and `double` — it is a floating-point type backed by `*big.Rat`.
+- `integer` only accepts `int8`, `int16`, `int32`, `int`, `int64`, and `long` — it is an integer type backed by `*big.Int`.
+
+## Implementation specifics
+
+### Regexp engine support is limited to Go
+
+The parser does not support ECMA-262 regular expressions. Instead, it uses Go's regular expression engine, which is RE2-based and does not support backreferences or look-around assertions. This means that some regular expressions that are valid in RAML may not be supported by this parser.
+
+### Includes and root path handling
+
+[RAML Includes](https://github.com/raml-org/raml-spec/blob/master/versions/raml-10/raml-10.md#includes)
+allow including files by absolute path, relative path, and a URL. According to the specification,
+absolute paths should be interpreted as relative to root RAML location. The parser extends
+this behavior by providing workspace folder configuration which is, by default, derived from the
+parsed file location. This is compliant with the specification and also allows the library users
+to flexibly choose how they can work with the root and dependent fragments that may reference each other via
+absolute paths.
+
+For security reasons, the parser restricts file access to the workspace folder and disallows access
+to files outside of it. When working with dependent files, it's recommended to set an approparite workspace
+folder that is common for all dependent fragments.
+
+Command-line tool by default uses the fragment location as a workspace folder, but
+it can be overridden by the `-w` flag. Language server uses workspace folders provided by the client
+during the server initialization. For library usage, the workspace folder can be set by using `raml.OptWithWorkspaceRoot(string)` option.
+
+### Remote includes
+
+RAML specification allows including remote files via URL. For security reasons, the
+parser disallows them by default. For command-line tool and language server, remote includes
+can be enabled by the `-r` flag. For library usage, remote includes can be enabled by using
+the `raml.OptWithHTTPClient(*http.Client)` option and either bring their own HTTP client with
+the desired configuration or use `raml.NewHTTPClient()` to allow remote includes.
+
+### Reference resolution in typed fragments
+
+All typed fragments (Library, DataType, Trait, ResourceType, etc.) are self-contained.
+A fragment may only reference types it declares itself or imports via its own `uses:` map.
+It cannot use types from the document that includes it. Non-parameterized trait and
+resource type fragments without optional methods are compiled eagerly at parse time; any
+unqualified type reference that cannot be resolved within the fragment's own `uses:` is
+rejected immediately:
+
+```yaml
+# traits/paged.raml
+#%RAML 1.0 Trait
+responses:
+  200:
+    body:
+      application/json:
+        type: PagedResult        # ✗ error: PagedResult not declared in this fragment's uses:
+```
+
+All external type dependencies must be imported in the fragment's own `uses:` and
+referenced with the qualified (`alias.TypeName`) form:
+
+```yaml
+# traits/paged.raml
+#%RAML 1.0 Trait
+uses:
+  models: ../models.raml
+responses:
+  200:
+    body:
+      application/json:
+        type: models.PagedResult # ✓
+```
+
+Inline definitions (declared directly in the root API/library under `traits:`, `resourceTypes:`,
+`types:`, etc.) follow the opposite rule: they resolve types against the root API's own
+`types:` namespace. Both unqualified and qualified (`lib.Foo`) names work; forward
+references are resolved at unwrap time.
+
+### Traits and resource types: template resolution
+
+Traits and resource types are templates: they declare `<<parameters>>` that are filled in
+at the point of use. This affects how type names inside a template are resolved.
+
+#### Type parameters
+
+A type name passed as a `<<parameter>>` value is resolved against the **calling
+document's** type namespace, not the template's. This applies equally to traits and
+resource types. The calling document must import any type library it references in
+parameter values; the template itself needs no corresponding `uses:` entry.
+
+`traits/paged.raml`:
+```yaml
+#%RAML 1.0 Trait
+responses:
+  200:
+    body:
+      application/json:
+        type: <<responseType>>
+```
+
+`api.raml`:
+```yaml
+#%RAML 1.0
+title: Example API
+uses:
+  types: types.raml
+types:
+  PagedResult:
+    properties:
+      items: any[]
+      total: integer
+traits:
+  paged: !include traits/paged.raml
+/items:
+  get:
+    is:
+      - paged:
+          responseType: types.PagedResult   # resolved from api.raml's uses:
+```
+
+The resolved `GET /items` operation:
+```yaml
+/items:
+  get:
+    responses:
+      200:
+        body:
+          application/json:
+            type: types.PagedResult   # resolved from api.raml's uses:
+```
+
+The same rule applies to resource type parameters:
+
+`resourceTypes/collection.raml`:
+```yaml
+#%RAML 1.0 ResourceType
+get:
+  responses:
+    200:
+      body:
+        application/json:
+          type: <<itemType>>
+```
+
+`api.raml`:
+```yaml
+#%RAML 1.0
+title: Example API
+uses:
+  types: types.raml    # api.raml imports the library, not the RT fragment
+resourceTypes:
+  collection: !include resourceTypes/collection.raml
+/items:
+  type:
+    collection:
+      itemType: types.Item   # resolved from api.raml's uses:
+```
+
+The resolved `GET /items` operation:
+```yaml
+/items:
+  get:
+    responses:
+      200:
+        body:
+          application/json:
+            type: types.Item   # resolved from api.raml's uses:
+```
+
+#### Trait and resource type name resolution
+
+Trait names in `is:` entries follow **lexical scoping**: a name resolves against the
+namespace of the document in which the `is:` entry is physically written.
+
+1. Names written in the **root API** resolve against the root API's `traits:` (and its
+   `uses:` for qualified `lib.traitName` forms).
+2. Names written **inside a fragment** (e.g. a ResourceType or Trait fragment) resolve
+   against that fragment's own `traits:`/`uses:` ONLY. There is no fallback to the
+   including API's trait namespace.
+
+Because a fragment has no implicit access to the root API's traits, an unqualified name
+written inside a fragment is a dangling reference and is rejected. To reference an API- or
+library-defined trait from within a fragment, import it via the fragment's own `uses:` and
+use the qualified form — this keeps the fragment self-contained.
+
+`resourceTypes/traits.raml`:
+
+```yaml
+#%RAML 1.0 Library
+traits:
+  paged:
+    queryParameters:
+      page: integer
+      pageSize: integer
+```
+
+`resourceTypes/collection.raml`:
+
+```yaml
+#%RAML 1.0 ResourceType
+uses:
+  traitsLib: traits.raml
+get:
+  is: [traitsLib.paged]   # qualified via the fragment's own uses:
+  responses:
+    200:
+      body:
+        application/json:
+          type: object
+```
+
+`api.raml`:
+
+```yaml
+#%RAML 1.0
+title: Example API
+resourceTypes:
+  collection: !include resourceTypes/collection.raml
+/items:
+  type: collection
+```
+
+The resolved `GET /items` operation:
+
+```yaml
+/items:
+  get:
+    queryParameters:
+      page: integer     # from paged trait in traits.raml
+      pageSize: integer # from paged trait in traits.raml
+    responses:
+      200:
+        body:
+          application/json:
+            type: object  # from collection resource type
+```
+
+A trait declared directly in the root API is referenced by its unqualified name only from
+within the root API itself:
+
+```yaml
+#%RAML 1.0
+title: Example API
+traits:
+  paged:
+    queryParameters:
+      page: integer
+/items:
+  get:
+    is: [paged]   # written in the root API → resolved against the root API's traits:
+```
+
+Resource type names on endpoints are resolved against the root API's `resourceTypes:`.
+Both unqualified and qualified (`lib.rtName`) forms are supported via the root API's own
+`uses:` map.
+
+`common-resource-types.raml`:
+
+```yaml
+#%RAML 1.0 Library
+resourceTypes:
+  collection:
+    get:
+      responses:
+        200:
+          body:
+            application/json:
+              type: object[]
+```
+
+`api.raml`:
+
+```yaml
+#%RAML 1.0
+title: Example API
+uses:
+  rt: ./common-resource-types.raml
+resourceTypes:
+  collection:
+    get:
+      responses:
+        200:
+          body:
+            application/json:
+              type: object
+/items:
+  type: rt.collection   # qualified — resolved via api.raml's uses:
+/users:
+  type: collection      # unqualified — resolved against api.raml's resourceTypes:
+```
+
+The resolved endpoints:
+
+```yaml
+/items:
+  get:
+    responses:
+      200:
+        body:
+          application/json:
+            type: object[]  # from rt.collection in common-resource-types.raml
+
+/users:
+  get:
+    responses:
+      200:
+        body:
+          application/json:
+            type: object    # from collection in api.raml's own resourceTypes:
+```
+
 ## Installation
 
 ### Library
 
-```
+```shell
 go get -u github.com/acronis/go-raml
 ```
 
 ### CLI
 
 Go install
-```
+
+```shell
 go install github.com/acronis/go-raml/cmd/raml@latest
 ```
 
 Make install
-```
+
+```shell
 make install
 ```
 
@@ -345,7 +678,7 @@ is unmodified. Be aware
 that the parser may generate recursive structures, depending on your definition, and you may need to implement recursion
 detection when traversing the model.
 
-The parser currently provides two options:
+The parser currently provides the following options:
 
 * `raml.OptWithValidate()` - performs validation of the resulting model (types inheritance validation, types facet
   validations, annotation types and instances validation, examples, defaults, instances, etc.). Also performs unwrap if
@@ -355,8 +688,17 @@ The parser currently provides two options:
   structures. Unwrap resolves the inheritance chain and links and compiles a complete type, with all properties of its
   parents/links.
 
+* `raml.OptWithRawSource()` - retains the raw YAML AST after parsing, for tooling consumers (LSP servers, formatters,
+  round-trip transformers). Enables two complementary indices:
+  * **Per-fragment node map** — retrieve the `*yaml.Node` root for any parsed fragment via `RAML.GetSourceNode(path)`.
+    Useful for per-token position queries (e.g. determining which key a cursor falls inside).
+  * **Entity source-info index** — maps every model entity's ID to the key+value `*yaml.Node` pair it was decoded from.
+    Retrieve via `RAML.SourceInfo()` and look up individual entities with `SourceInfo.Get(entity.ID)`.
+
+  Non-tooling consumers (validators, code generators) should omit this option to keep memory overhead minimal.
+
 > [!NOTE]
-> In most cases, the use of both flags is advised. If you need to access unmodified types, use only `OptWithValidate()`. Memory consumption may be higher and processing time may be longer since `OptWithValidate()` performs a dedicated copy and unwrap for each type.
+> In most cases, the use of both `OptWithValidate()` and `raml.OptWithUnwrap()` is advised. If you need to access unmodified types, use only `OptWithValidate()`. Memory consumption may be higher and processing time may be longer since `OptWithValidate()` performs a dedicated copy and unwrap for each type.
 
 ### Parsing from string
 
@@ -392,7 +734,7 @@ types:
 
 	// Parse with validation
 	// Here we omit OptWithUnwrap to show the difference between child and parent.
-	r, err := raml.ParseFromString(content, "library.raml", workDir, raml.OptWithValidate())
+	r, err := raml.ParseFromString(content, "library.raml", workDir, raml.OptWithValidate(), raml.OptWithUnwrap())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -403,21 +745,21 @@ types:
 	typ := base.Shape.(*raml.StringShape)
 	fmt.Printf(
 		"Type name: %s, type: %s, minLength: %d, location: %s\n",
-		typ.Name, typ.Type, *typ.MinLength, typ.Location,
+		typ.Name, typ.Type, typ.MinLength.Value, typ.Location,
 	)
 	// Cast type to StringShape since parent type is string
 	parentTyp := base.Inherits[0].Shape.(*raml.StringShape)
 	fmt.Printf("Inherits from:\n")
 	fmt.Printf(
 		"Type name: %s, type: %s, minLength: %d, location: %s\n",
-		parentTyp.Name, parentTyp.Type, parentTyp.MinLength, parentTyp.Location,
+		parentTyp.Name, parentTyp.Type, parentTyp.MinLength.Value, parentTyp.Location,
 	)
 }
 ```
 
 The expected output is:
 
-```
+```text
 Type name: ChildType, type: string, minLength: 5, location: <absolute_path>/library.raml
 Inherits from:
 Type name: BasicType, type: string, minLength: 0, location: <absolute_path>/library.raml
@@ -483,7 +825,7 @@ types:
 `
 
 	// Parse with validation
-	r, err := raml.ParseFromString(content, "library.raml", workDir, raml.OptWithValidate())
+	r, err := raml.ParseFromString(content, "library.raml", workDir, raml.OptWithValidate(), raml.OptWithUnwrap())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -494,7 +836,7 @@ types:
 	typ := base.Shape.(*raml.StringShape)
 	fmt.Printf(
 		"Type name: %s, type: %s, minLength: %d, location: %s\n",
-		typ.Name, typ.Type, *typ.MinLength, typ.Location,
+		typ.Name, typ.Type, typ.MinLength.Value, typ.Location,
 	)
 	fmt.Printf("Empty string: %v\n", base.Validate(""))
 	fmt.Printf("Less than 5 characters: %v\n", base.Validate("abc"))
@@ -515,6 +857,7 @@ Not a string: invalid type, got int, expected string
 ## CLI usage examples
 
 Flags:
+
 * `-v` `--verbosity count` - increase verbosity level, one flag for each level, e.g. `-v` for DEBUG
 * `-d` `--ensure-duplicates` - ensure that there are no duplicates in tracebacks
 
@@ -525,17 +868,20 @@ The `validate` command validates the RAML file against the RAML 1.0 specificatio
 The following commands will validate the RAML files and output the validation errors.
 
 One file
+
 ```bash
 raml validate <path_to_your_file>.raml
 ```
 
 Multiple files
+
 ```bash
 raml validate <path_to_your_file1>.raml <path_to_your_file2>.raml <path_to_your_file3>.raml
 ```
 
 Output example
-```
+
+```shell
 % raml validate library.raml
 [11:46:40.053] INFO: Validating RAML... {
   "path": "library.raml"

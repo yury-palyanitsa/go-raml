@@ -1,8 +1,6 @@
 package raml
 
 import (
-	"container/list"
-	"context"
 	"math/big"
 	"reflect"
 	"regexp"
@@ -12,415 +10,231 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// makeSource links Base().Shape on src and returns src. Used in Inherit tests.
+func makeSource(src Shape) Shape {
+	src.Base().Shape = src
+	return src
+}
+
+// baseWith returns a BaseShape initialized with CustomShapeFacets. If withRAML
+// is true the internal raml pointer is set (required by facets that call makeDataNode).
+func baseWith(t *testing.T, withRAML bool) *BaseShape {
+	b := &BaseShape{CustomShapeFacets: orderedmap.New[string, *DataNode](0)}
+	if withRAML {
+		b.raml = makeTestRAML(t)
+	}
+	return b
+}
+
+// ── MakeEnum / isCompatibleEnum ──────────────────────────────────────────────
+
 func TestRAML_MakeEnum(t *testing.T) {
-	type fields struct {
-		fragmentsCache          map[string]Fragment
-		fragmentTypes           map[string]map[string]*BaseShape
-		fragmentAnnotationTypes map[string]map[string]*BaseShape
-		shapes                  []*BaseShape
-		entryPoint              Fragment
-		domainExtensions        []*DomainExtension
-		unresolvedShapes        list.List
-		ctx                     context.Context
-	}
-	type args struct {
-		v        *yaml.Node
-		location string
-	}
+	r := makeTestRAML(t)
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    Nodes
+		node    *yaml.Node
+		wantLen int
 		wantErr bool
 	}{
 		{
-			name: "valid enum",
-			fields: fields{
-				fragmentsCache: make(map[string]Fragment),
-				fragmentTypes:  make(map[string]map[string]*BaseShape),
-			},
-			args: args{
-				v: &yaml.Node{
-					Kind: yaml.SequenceNode,
-					Content: []*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "value1"},
-						{Kind: yaml.ScalarNode, Value: "value2"},
-					},
+			name: "valid sequence",
+			node: &yaml.Node{
+				Kind: yaml.SequenceNode,
+				Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "v1"},
+					{Kind: yaml.ScalarNode, Value: "v2"},
 				},
-				location: "test_location",
 			},
-			want: Nodes{
-				{Value: "value1"},
-				{Value: "value2"},
-			},
-			wantErr: false,
+			wantLen: 2,
 		},
 		{
-			name: "invalid enum kind",
-			fields: fields{
-				fragmentsCache: make(map[string]Fragment),
-				fragmentTypes:  make(map[string]map[string]*BaseShape),
-			},
-			args: args{
-				v: &yaml.Node{
-					Kind: yaml.MappingNode,
-				},
-				location: "test_location",
-			},
-			want:    nil,
+			name:    "non-sequence node",
+			node:    &yaml.Node{Kind: yaml.MappingNode},
 			wantErr: true,
 		},
 		{
-			name: "invalid node",
-			fields: fields{
-				fragmentsCache: make(map[string]Fragment),
-				fragmentTypes:  make(map[string]map[string]*BaseShape),
+			name: "invalid item in sequence",
+			node: &yaml.Node{
+				Kind:    yaml.SequenceNode,
+				Content: []*yaml.Node{{Kind: yaml.SequenceNode, Value: "{"}},
 			},
-			args: args{
-				v: &yaml.Node{
-					Kind: yaml.SequenceNode,
-					Content: []*yaml.Node{
-						{Kind: yaml.SequenceNode, Value: "{"},
-					},
-				},
-				location: "test_location",
-			},
-			want:    nil,
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &RAML{
-				fragmentsCache:          tt.fields.fragmentsCache,
-				fragmentTypes:           tt.fields.fragmentTypes,
-				fragmentAnnotationTypes: tt.fields.fragmentAnnotationTypes,
-				shapes:                  tt.fields.shapes,
-				entryPoint:              tt.fields.entryPoint,
-				domainExtensions:        tt.fields.domainExtensions,
-				unresolvedShapes:        tt.fields.unresolvedShapes,
-				ctx:                     tt.fields.ctx,
-			}
-			got, err := r.MakeEnum(tt.args.v, tt.args.location)
+			got, err := r.MakeEnum(tt.node, "test.raml")
 			if (err != nil) != tt.wantErr {
-				t.Errorf("MakeEnum() error = %v, wantErr %v", err, tt.wantErr)
-				return
+				t.Fatalf("MakeEnum() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			for i := range got {
-				if got[i].Value != tt.want[i].Value {
-					t.Errorf("MakeEnum() got = %v, want %v", got, tt.want)
-				}
+			if !tt.wantErr && len(got) != tt.wantLen {
+				t.Errorf("MakeEnum() len = %d, want %d", len(got), tt.wantLen)
 			}
 		})
 	}
 }
 
 func Test_isCompatibleEnum(t *testing.T) {
-	type args struct {
-		source Nodes
-		target Nodes
+	n := func(vals ...string) Nodes {
+		out := make(Nodes, len(vals))
+		for i, v := range vals {
+			out[i] = &DataNode{Value: NewScalarNodeValue(v)}
+		}
+		return out
 	}
 	tests := []struct {
-		name string
-		args args
-		want bool
+		name   string
+		source Nodes
+		target Nodes
+		want   bool
 	}{
-		{
-			name: "target is subset of source",
-			args: args{
-				source: Nodes{{Value: "a"}, {Value: "b"}, {Value: "c"}},
-				target: Nodes{{Value: "a"}, {Value: "b"}},
-			},
-			want: true,
-		},
-		{
-			name: "target is not subset of source",
-			args: args{
-				source: Nodes{{Value: "a"}, {Value: "b"}},
-				target: Nodes{{Value: "a"}, {Value: "d"}},
-			},
-			want: false,
-		},
-		{
-			name: "target is empty",
-			args: args{
-				source: Nodes{{Value: "a"}, {Value: "b"}},
-				target: Nodes{},
-			},
-			want: true,
-		},
-		{
-			name: "source is empty",
-			args: args{
-				source: Nodes{},
-				target: Nodes{{Value: "a"}},
-			},
-			want: false,
-		},
-		{
-			name: "both source and target are empty",
-			args: args{
-				source: Nodes{},
-				target: Nodes{},
-			},
-			want: true,
-		},
+		{"target subset of source", n("a", "b", "c"), n("a", "b"), true},
+		{"target not subset of source", n("a", "b"), n("a", "d"), false},
+		{"empty target", n("a", "b"), Nodes{}, true},
+		{"empty source non-empty target", Nodes{}, n("a"), false},
+		{"both empty", Nodes{}, Nodes{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isCompatibleEnum(tt.args.source, tt.args.target); got != tt.want {
+			if got := isCompatibleEnum(tt.source, tt.target); got != tt.want {
 				t.Errorf("isCompatibleEnum() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestIntegerShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		FormatFacets  FormatFacets
-		IntegerFacets IntegerFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
+func TestBaseShape_validateEnum(t *testing.T) {
+	n := func(vals ...any) Nodes {
+		out := make(Nodes, len(vals))
+		for i, v := range vals {
+			out[i] = &DataNode{Value: NewScalarNodeValue(v)}
+		}
+		return out
 	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		enum    Nodes
+		value   any
 		wantErr bool
 	}{
+		// string matching
+		{"string match", n("a", "b", "c"), "b", false},
+		{"string no match", n("a", "b", "c"), "d", true},
+		// integer matching
+		{"int match", n(1, 2, 3), 2, false},
+		{"int no match", n(1, 2, 3), 4, true},
+		// numeric cross-type: int enum value equals float64 input
+		{"int enum float64 value equal", n(1, 2), float64(1), false},
+		{"float64 enum int value equal", n(float64(1.0), float64(2.0)), 1, false},
+		// bool matching
+		{"bool true match", n(true, false), true, false},
+		{"bool false match", n(true, false), false, false},
+		{"bool no match", n(true), false, true},
+		// nil matching
+		{"nil match", Nodes{{Value: NewScalarNodeValue(nil)}}, nil, false},
+		{"nil no match", n("a"), nil, true},
+		// slice matching
 		{
-			name: "valid integer",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: false,
+			"slice match",
+			Nodes{{Value: anyToNodeValue([]any{"x", "y"})}},
+			[]any{"x", "y"},
+			false,
 		},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   "not an integer",
-				in1: "test",
-			},
-			wantErr: true,
+			"slice element mismatch",
+			Nodes{{Value: anyToNodeValue([]any{"x", "y"})}},
+			[]any{"x", "z"},
+			true,
 		},
 		{
-			name: "nil value",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   nil,
-				in1: "test",
-			},
-			wantErr: true,
+			"slice length mismatch",
+			Nodes{{Value: anyToNodeValue([]any{"x"})}},
+			[]any{"x", "y"},
+			true,
+		},
+		// map matching
+		{
+			"map match",
+			Nodes{{Value: anyToNodeValue(map[string]any{"a": 1})}},
+			map[string]any{"a": 1},
+			false,
 		},
 		{
-			name: "negative integer",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   -123,
-				in1: "test",
-			},
-			wantErr: false,
+			"map value mismatch",
+			Nodes{{Value: anyToNodeValue(map[string]any{"a": 1})}},
+			map[string]any{"a": 2},
+			true,
 		},
 		{
-			name: "zero value",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   0,
-				in1: "test",
-			},
-			wantErr: false,
+			"map key mismatch",
+			Nodes{{Value: anyToNodeValue(map[string]any{"a": 1})}},
+			map[string]any{"b": 1},
+			true,
 		},
 		{
-			name: "large integer",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   9223372036854775807,
-				in1: "test",
-			},
-			wantErr: false,
+			"map size mismatch",
+			Nodes{{Value: anyToNodeValue(map[string]any{"a": 1})}},
+			map[string]any{"a": 1, "b": 2},
+			true,
+		},
+		// single-element enum
+		{"single element match", n("only"), "only", false},
+		{"single element no match", n("only"), "other", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &BaseShape{Enum: tt.enum}
+			err := s.validateEnum(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateEnum() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// ── IntegerShape ─────────────────────────────────────────────────────────────
+
+func TestIntegerShape_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    *BaseShape
+		facets  IntegerFacets
+		v       any
+		wantErr bool
+	}{
+		{"valid int", &BaseShape{}, IntegerFacets{}, 42, false},
+		{"valid float whole", &BaseShape{}, IntegerFacets{}, 123.0, false},
+		{"valid uint", &BaseShape{}, IntegerFacets{}, uint(5), false},
+		{"invalid string", &BaseShape{}, IntegerFacets{}, "123", true},
+		{"invalid bool", &BaseShape{}, IntegerFacets{}, true, true},
+		{"invalid nil", &BaseShape{}, IntegerFacets{}, nil, true},
+		{
+			"below minimum",
+			&BaseShape{}, IntegerFacets{Minimum: scalarFacetOf(big.NewInt(100))},
+			5, true,
 		},
 		{
-			name: "integer as float",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   123.0,
-				in1: "test",
-			},
-			wantErr: false,
+			"above maximum",
+			&BaseShape{}, IntegerFacets{Maximum: scalarFacetOf(big.NewInt(100))},
+			150, true,
 		},
 		{
-			name: "integer as uint",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   uint(123),
-				in1: "test",
-			},
-			wantErr: false,
+			"enum match",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1)}, {Value: NewScalarNodeValue(uint64(2))}}},
+			IntegerFacets{},
+			1, false,
 		},
 		{
-			name: "string integer",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   "123",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "boolean value",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   true,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty string",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   "",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate minimum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				IntegerFacets: IntegerFacets{Minimum: func() *big.Int {
-					i, _ := new(big.Int).SetString("100", 10)
-					return i
-				}(),
-				},
-			},
-			args: args{
-				v:   5,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate maximum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				IntegerFacets: IntegerFacets{Maximum: func() *big.Int {
-					i, _ := new(big.Int).SetString("100", 10)
-					return i
-				}(),
-				},
-			},
-			args: args{
-				v:   150,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate enum negative",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{Enum: []*Node{{Value: 1}, {Value: uint64(2)}}},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   3,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate enum positive",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{Enum: []*Node{{Value: 1}, {Value: uint64(2)}}},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v:   1,
-				in1: "test",
-			},
-			wantErr: false,
+			"enum miss",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1)}, {Value: NewScalarNodeValue(uint64(2))}}},
+			IntegerFacets{},
+			3, true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &IntegerShape{
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				FormatFacets:  tt.fields.FormatFacets,
-				IntegerFacets: tt.fields.IntegerFacets,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
+			s := NewTestShapeWithBase(&IntegerShape{IntegerFacets: tt.facets}, tt.base)
+			if err := s.BaseShape.Validate(tt.v); (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -428,274 +242,92 @@ func TestIntegerShape_Validate(t *testing.T) {
 }
 
 func TestIntegerShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		FormatFacets  FormatFacets
-		IntegerFacets IntegerFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    Shape
+		shape   *IntegerShape
+		source  Shape
 		wantErr bool
 	}{
 		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:     &BaseShape{},
-					EnumFacets:    EnumFacets{},
-					FormatFacets:  FormatFacets{},
-					IntegerFacets: IntegerFacets{},
-				},
-			},
-			want: &IntegerShape{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: false,
+			"same type",
+			NewTestShape(&IntegerShape{}, 1),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{}}),
+			false,
 		},
 		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					StringFacets: StringFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			NewTestShape(&IntegerShape{}, 2),
+			makeSource(&StringShape{BaseShape: &BaseShape{}}),
+			true,
 		},
 		{
-			name: "minimum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				IntegerFacets: IntegerFacets{Minimum: func() *big.Int {
-					i, _ := new(big.Int).SetString("100", 10)
-					return i
-				}()},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					IntegerFacets: IntegerFacets{Minimum: func() *big.Int {
-						i, _ := new(big.Int).SetString("120", 10)
-						return i
-					}()},
-				},
-			},
-			wantErr: true,
+			"minimum less restrictive in source",
+			NewTestShapeWithBase(&IntegerShape{IntegerFacets: IntegerFacets{Minimum: scalarFacetOf(big.NewInt(100))}}, &BaseShape{}),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{}, IntegerFacets: IntegerFacets{Minimum: scalarFacetOf(big.NewInt(120))}}),
+			true,
 		},
 		{
-			name: "maximum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				IntegerFacets: IntegerFacets{Maximum: func() *big.Int {
-					i, _ := new(big.Int).SetString("100", 10)
-					return i
-				}(),
-				},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					IntegerFacets: IntegerFacets{Maximum: func() *big.Int {
-						i, _ := new(big.Int).SetString("80", 10)
-						return i
-					}()},
-				},
-			},
-
-			wantErr: true,
+			"maximum less restrictive in source",
+			NewTestShapeWithBase(&IntegerShape{IntegerFacets: IntegerFacets{Maximum: scalarFacetOf(big.NewInt(100))}}, &BaseShape{}),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{}, IntegerFacets: IntegerFacets{Maximum: scalarFacetOf(big.NewInt(80))}}),
+			true,
 		},
 		{
-			name: "enum constraint violation",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{Enum: []*Node{{Value: 1}, {Value: uint64(2)}}},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:     &BaseShape{},
-					EnumFacets:    EnumFacets{Enum: []*Node{{Value: 3}}},
-					FormatFacets:  FormatFacets{},
-					IntegerFacets: IntegerFacets{},
-				},
-			},
-			wantErr: true,
+			"enum in source not subset of base",
+			NewTestShapeWithBase(&IntegerShape{}, &BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1)}, {Value: NewScalarNodeValue(uint64(2))}}}),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(3)}}}}),
+			true,
 		},
 		{
-			name: "format constraint violation",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				FormatFacets: FormatFacets{Format: func() *string {
-					s := "int32"
-					return &s
-				}()},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:  &BaseShape{},
-					EnumFacets: EnumFacets{},
-					FormatFacets: FormatFacets{Format: func() *string {
-						s := "int64"
-						return &s
-					}()},
-					IntegerFacets: IntegerFacets{},
-				},
-			},
-			wantErr: true,
+			"format mismatch",
+			NewTestShapeWithBase(&IntegerShape{FormatFacets: FormatFacets{Format: scalarFacetOf("int32")}}, &BaseShape{}),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{}, FormatFacets: FormatFacets{Format: scalarFacetOf("int64")}}),
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &IntegerShape{
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				FormatFacets:  tt.fields.FormatFacets,
-				IntegerFacets: tt.fields.IntegerFacets,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
+			if _, err := tt.shape.BaseShape.Inherit(tt.source.Base()); (err != nil) != tt.wantErr {
 				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Inherit() got = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
 func TestIntegerShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		FormatFacets  FormatFacets
-		IntegerFacets IntegerFacets
-	}
+	bigInt := func(s string) *big.Int { n, _ := new(big.Int).SetString(s, 10); return n }
 	tests := []struct {
 		name    string
-		fields  fields
+		shape   *IntegerShape
 		wantErr bool
 	}{
 		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: false,
+			"valid",
+			&IntegerShape{BaseShape: &BaseShape{}},
+			false,
 		},
 		{
-			name: "invalid minimum and maximum",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				IntegerFacets: IntegerFacets{
-					Minimum: func() *big.Int {
-						i, _ := new(big.Int).SetString("100", 10)
-						return i
-					}(),
-					Maximum: func() *big.Int {
-						i, _ := new(big.Int).SetString("50", 10)
-						return i
-					}(),
-				},
-			},
-			wantErr: true,
+			"minimum greater than maximum",
+			&IntegerShape{BaseShape: &BaseShape{}, IntegerFacets: IntegerFacets{
+				Minimum: scalarFacetOf(bigInt("100")),
+				Maximum: scalarFacetOf(bigInt("50")),
+			}},
+			true,
 		},
 		{
-			name: "valid enum",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{Enum: []*Node{{Value: 1}, {Value: 2}}},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: false,
+			"valid format",
+			&IntegerShape{BaseShape: &BaseShape{}, FormatFacets: FormatFacets{Format: scalarFacetOf("int32")}},
+			false,
 		},
 		{
-			name: "invalid enum",
-			fields: fields{
-				BaseShape:     &BaseShape{},
-				EnumFacets:    EnumFacets{Enum: []*Node{{Value: "a"}, {Value: "b"}}},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid format",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				FormatFacets: FormatFacets{Format: func() *string {
-					s := "int32"
-					return &s
-				}()},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid format",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				FormatFacets: FormatFacets{Format: func() *string {
-					s := "invalid"
-					return &s
-				}()},
-				IntegerFacets: IntegerFacets{},
-			},
-			wantErr: true,
+			"invalid format",
+			&IntegerShape{BaseShape: &BaseShape{}, FormatFacets: FormatFacets{Format: scalarFacetOf("invalid")}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &IntegerShape{
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				FormatFacets:  tt.fields.FormatFacets,
-				IntegerFacets: tt.fields.IntegerFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
+			if err := tt.shape.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -703,507 +335,184 @@ func TestIntegerShape_Check(t *testing.T) {
 }
 
 func TestIntegerShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		FormatFacets  FormatFacets
-		IntegerFacets IntegerFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "valid YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "key1"},
-					{Kind: yaml.ScalarNode, Value: "value1"},
-					{Kind: yaml.ScalarNode, Value: "key2"},
-					{Kind: yaml.ScalarNode, Value: "value2"},
-				},
-			},
-			wantErr: false,
+			"empty nodes",
+			baseWith(t, false),
+			nil, false,
 		},
 		{
-			name: "invalid YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.MappingNode, Value: "{"},
-					{Kind: yaml.MappingNode, Value: "{"},
-				},
-			},
-			wantErr: true,
+			"custom facet key-value",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "key1"}, {Kind: yaml.ScalarNode, Value: "value1"}},
+			false,
 		},
 		{
-			name: "empty YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{},
-			},
-			wantErr: false,
+			"invalid custom facet value",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.MappingNode, Value: "{"}, {Kind: yaml.MappingNode, Value: "{"}},
+			true,
 		},
 		{
-			name: "odd number of YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "key1"},
-					{Kind: yaml.ScalarNode, Value: "value1"},
-					{Kind: yaml.ScalarNode, Value: "empty value"},
-				},
-			},
-			wantErr: true,
+			"minimum valid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "minimum"}, {Kind: yaml.ScalarNode, Value: "10", Tag: "!!int"}},
+			false,
 		},
 		{
-			name: "valid facet minimum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "minimum"},
-					{Kind: yaml.ScalarNode, Value: "10", Tag: "!!int"},
-				},
-			},
-			wantErr: false,
+			"minimum invalid value",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "minimum"}, {Kind: yaml.ScalarNode, Value: "invalid", Tag: "!!int"}},
+			true,
 		},
 		{
-			name: "invalid facet minimum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "minimum"},
-					{Kind: yaml.ScalarNode, Value: "invalid", Tag: "!!int"},
-				},
-			},
-			wantErr: true,
+			"maximum valid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "maximum"}, {Kind: yaml.ScalarNode, Value: "100", Tag: "!!int"}},
+			false,
 		},
 		{
-			name: "valid facet maximum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "maximum"},
-					{Kind: yaml.ScalarNode, Value: "100", Tag: "!!int"},
-				},
-			},
-			wantErr: false,
+			"maximum invalid value",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "maximum"}, {Kind: yaml.ScalarNode, Value: "invalid", Tag: "!!int"}},
+			true,
 		},
 		{
-			name: "invalid facet maximum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "maximum"},
-					{Kind: yaml.ScalarNode, Value: "invalid", Tag: "!!int"},
-				},
-			},
-			wantErr: true,
+			"multipleOf valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "multipleOf"}, {Kind: yaml.ScalarNode, Value: "5"}},
+			false,
 		},
 		{
-			name: "valid facet multipleOf",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "multipleOf"},
-					{Kind: yaml.ScalarNode, Value: "5"},
-				},
-			},
-			wantErr: false,
+			"multipleOf invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "multipleOf"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet multipleOf",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "multipleOf"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			"format valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "format"}, {Kind: yaml.ScalarNode, Value: "int32"}},
+			false,
 		},
 		{
-			name: "valid facet format",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "format"},
-					{Kind: yaml.ScalarNode, Value: "int32"},
-				},
-			},
-			wantErr: false,
+			"format invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "format"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet format",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
+			"enum valid sequence",
+			baseWith(t, false),
+			[]*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "enum"},
+				{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "1"},
+					{Kind: yaml.ScalarNode, Value: "2"},
+				}},
 			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "format"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			false,
 		},
 		{
-			name: "valid facet enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "enum"},
-					{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "1"},
-						{Kind: yaml.ScalarNode, Value: "2"},
-					}},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid facet enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:    EnumFacets{},
-				FormatFacets:  FormatFacets{},
-				IntegerFacets: IntegerFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "enum"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			// enum is handled at BaseShape.decodeValueNode; non-sequence falls through to custom facets
+			"enum non-sequence falls through",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "enum"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &IntegerShape{
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				FormatFacets:  tt.fields.FormatFacets,
-				IntegerFacets: tt.fields.IntegerFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			s := &IntegerShape{BaseShape: tt.base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestNumberShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		FormatFacets FormatFacets
-		NumberFacets NumberFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
+func TestIntegerShape_Alias(t *testing.T) {
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		source  Shape
 		wantErr bool
 	}{
 		{
-			name: "valid number",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
+			"same type with facets",
+			&IntegerShape{
+				BaseShape:     &BaseShape{Type: "integer"},
+				IntegerFacets: IntegerFacets{Minimum: scalarFacetOf(big.NewInt(1)), Maximum: scalarFacetOf(big.NewInt(10))},
 			},
-			args: args{
-				v:   123.45,
-				in1: "test",
-			},
-			wantErr: false,
+			false,
+		},
+		{"incompatible type", &StringShape{BaseShape: &BaseShape{Type: "string"}}, true},
+	}
+	s := &IntegerShape{
+		BaseShape:     &BaseShape{Type: "integer"},
+		IntegerFacets: IntegerFacets{Minimum: scalarFacetOf(big.NewInt(1)), Maximum: scalarFacetOf(big.NewInt(10))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.alias(tt.source)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("alias() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && !reflect.DeepEqual(got, tt.source) {
+				t.Errorf("alias() = %v, want %v", got, tt.source)
+			}
+		})
+	}
+}
+
+// ── NumberShape ──────────────────────────────────────────────────────────────
+
+func TestNumberShape_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    *BaseShape
+		facets  NumberFacets
+		v       any
+		wantErr bool
+	}{
+		{"valid float64", &BaseShape{}, NumberFacets{}, 123.45, false},
+		{"valid int", &BaseShape{}, NumberFacets{}, 123, false},
+		{"valid uint zero", &BaseShape{}, NumberFacets{}, uint(0), false},
+		{"invalid string", &BaseShape{}, NumberFacets{}, "x", true},
+		{"invalid bool", &BaseShape{}, NumberFacets{}, true, true},
+		{"invalid nil", &BaseShape{}, NumberFacets{}, nil, true},
+		{
+			"below minimum",
+			&BaseShape{}, NumberFacets{Minimum: scalarFacetOf(ratOf("100"))},
+			5.0, true,
 		},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
+			"above maximum",
+			&BaseShape{}, NumberFacets{Maximum: scalarFacetOf(ratOf("100"))},
+			150.0, true,
 		},
 		{
-			name: "nil value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   nil,
-				in1: "test",
-			},
-			wantErr: true,
+			"enum match",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1.0)}, {Value: NewScalarNodeValue(2.0)}}},
+			NumberFacets{},
+			1.0, false,
 		},
 		{
-			name: "negative number",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   -123.45,
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "zero value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   uint(0),
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "large number",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   1e10,
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "number as integer",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "boolean value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   true,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty string",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   "",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate minimum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{Minimum: func() *float64 {
-					f := 100.0
-					return &f
-				}()},
-			},
-			args: args{
-				v:   5.0,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate maximum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{Maximum: func() *float64 {
-					f := 100.0
-					return &f
-				}()},
-			},
-			args: args{
-				v:   150.0,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate enum negative",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: 1.0}, {Value: 2.0}}},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   3.0,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "validate enum positive",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: 1.0}, {Value: 2.0}}},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v:   1.0,
-				in1: "test",
-			},
-			wantErr: false,
+			"enum miss",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1.0)}, {Value: NewScalarNodeValue(2.0)}}},
+			NumberFacets{},
+			3.0, true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &NumberShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				FormatFacets: tt.fields.FormatFacets,
-				NumberFacets: tt.fields.NumberFacets,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
+			s := NewTestShapeWithBase(&NumberShape{NumberFacets: tt.facets}, tt.base)
+			if err := s.BaseShape.Validate(tt.v); (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -1211,294 +520,90 @@ func TestNumberShape_Validate(t *testing.T) {
 }
 
 func TestNumberShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		FormatFacets FormatFacets
-		NumberFacets NumberFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    Shape
+		shape   *NumberShape
+		source  Shape
 		wantErr bool
 	}{
 		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{},
-				},
-			},
-			want: &NumberShape{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			wantErr: false,
+			"same type",
+			NewTestShape(&NumberShape{}, 1),
+			makeSource(&NumberShape{BaseShape: &BaseShape{}}),
+			false,
 		},
 		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape:     &BaseShape{},
-					EnumFacets:    EnumFacets{},
-					FormatFacets:  FormatFacets{},
-					IntegerFacets: IntegerFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			NewTestShape(&NumberShape{}, 2),
+			makeSource(&IntegerShape{BaseShape: &BaseShape{}}),
+			true,
 		},
 		{
-			name: "minimum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{Minimum: func() *float64 {
-					f := 5.0
-					return &f
-				}()},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{Minimum: func() *float64 {
-						f := 10.0
-						return &f
-					}()},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"minimum less restrictive in source",
+			NewTestShapeWithBase(&NumberShape{NumberFacets: NumberFacets{Minimum: scalarFacetOf(ratOf("5"))}}, &BaseShape{}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{}, NumberFacets: NumberFacets{Minimum: scalarFacetOf(ratOf("10"))}}),
+			true,
 		},
 		{
-			name: "maximum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{Maximum: func() *float64 {
-					f := 150.0
-					return &f
-				}()},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{Maximum: func() *float64 {
-						f := 100.0
-						return &f
-					}()},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"maximum less restrictive in source",
+			NewTestShapeWithBase(&NumberShape{NumberFacets: NumberFacets{Maximum: scalarFacetOf(ratOf("150"))}}, &BaseShape{}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{}, NumberFacets: NumberFacets{Maximum: scalarFacetOf(ratOf("100"))}}),
+			true,
 		},
 		{
-			name: "enum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: 1.0}, {Value: 2.0}}},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{Enum: []*Node{{Value: 3.0}}},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"enum in source not subset of base",
+			NewTestShapeWithBase(&NumberShape{}, &BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(1.0)}, {Value: NewScalarNodeValue(2.0)}}}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(3.0)}}}}),
+			true,
 		},
 		{
-			name: "format constraint violation",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				FormatFacets: FormatFacets{Format: func() *string {
-					s := "float"
-					return &s
-				}()},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:  &BaseShape{},
-					EnumFacets: EnumFacets{},
-					FormatFacets: FormatFacets{Format: func() *string {
-						s := "double"
-						return &s
-					}()},
-					NumberFacets: NumberFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"format mismatch",
+			NewTestShapeWithBase(&NumberShape{FormatFacets: FormatFacets{Format: scalarFacetOf("float")}}, &BaseShape{}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{}, FormatFacets: FormatFacets{Format: scalarFacetOf("double")}}),
+			true,
 		},
 		{
-			name: "multipleOf validation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{MultipleOf: func() *float64 {
-					f := 2.0
-					return &f
-				}()},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{MultipleOf: func() *float64 {
-						f := 2.0
-						return &f
-					}()},
-				},
-			},
-			want: &NumberShape{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{MultipleOf: func() *float64 {
-					f := 2.0
-					return &f
-				}()},
-			},
-			wantErr: false,
+			"multipleOf mismatch",
+			NewTestShapeWithBase(&NumberShape{NumberFacets: NumberFacets{MultipleOf: scalarFacetOf(ratOf("2"))}}, &BaseShape{}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{}, NumberFacets: NumberFacets{MultipleOf: scalarFacetOf(ratOf("2"))}}),
+			false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &NumberShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				FormatFacets: tt.fields.FormatFacets,
-				NumberFacets: tt.fields.NumberFacets,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
+			if _, err := tt.shape.BaseShape.Inherit(tt.source.Base()); (err != nil) != tt.wantErr {
 				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Inherit() got = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
 func TestNumberShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		FormatFacets FormatFacets
-		NumberFacets NumberFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		shape   *NumberShape
 		wantErr bool
 	}{
 		{
-			name: "valid minimum and maximum",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				NumberFacets: NumberFacets{
-					Minimum: func() *float64 {
-						f := 1.0
-						return &f
-					}(),
-					Maximum: func() *float64 {
-						f := 1.0
-						return &f
-					}(),
-				},
-			},
-			wantErr: false,
+			"valid min<=max",
+			&NumberShape{BaseShape: &BaseShape{}, NumberFacets: NumberFacets{
+				Minimum: scalarFacetOf(ratOf("1")),
+				Maximum: scalarFacetOf(ratOf("1")),
+			}},
+			false,
 		},
 		{
-			name: "invalid minimum and maximum",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				NumberFacets: NumberFacets{
-					Minimum: func() *float64 {
-						f := 2.0
-						return &f
-					}(),
-					Maximum: func() *float64 {
-						f := 1.0
-						return &f
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid enum values",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: Nodes{
-						{Value: 1.0},
-						{Value: 2.0},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid enum values",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: Nodes{
-						{Value: "invalid"},
-					},
-				},
-			},
-			wantErr: true,
+			"minimum greater than maximum",
+			&NumberShape{BaseShape: &BaseShape{}, NumberFacets: NumberFacets{
+				Minimum: scalarFacetOf(ratOf("2")),
+				Maximum: scalarFacetOf(ratOf("1")),
+			}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &NumberShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				FormatFacets: tt.fields.FormatFacets,
-				NumberFacets: tt.fields.NumberFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
+			if err := tt.shape.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -1506,477 +611,144 @@ func TestNumberShape_Check(t *testing.T) {
 }
 
 func TestNumberShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		FormatFacets FormatFacets
-		NumberFacets NumberFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "valid YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "key1"},
-					{Kind: yaml.ScalarNode, Value: "value1"},
-				},
-			},
-			wantErr: false,
+			"empty nodes",
+			baseWith(t, false),
+			nil, false,
 		},
 		{
-			name: "invalid YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "key1"},
-					{Kind: yaml.MappingNode, Value: "{"},
-				},
-			},
-			wantErr: true,
+			"custom facet",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "key1"}, {Kind: yaml.ScalarNode, Value: "value1"}},
+			false,
 		},
 		{
-			name: "empty YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{},
-			},
-			wantErr: false,
+			"invalid value node",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "key1"}, {Kind: yaml.MappingNode, Value: "{"}},
+			true,
 		},
 		{
-			name: "odd number of YAML nodes",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "key1"},
-				},
-			},
-			wantErr: true,
+			"minimum valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "minimum"}, {Kind: yaml.ScalarNode, Value: "1.0"}},
+			false,
 		},
 		{
-			name: "valid facet minimum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "minimum"},
-					{Kind: yaml.ScalarNode, Value: "1.0"},
-				},
-			},
-			wantErr: false,
+			"minimum invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "minimum"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet minimum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "minimum"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			"maximum valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "maximum"}, {Kind: yaml.ScalarNode, Value: "10.0"}},
+			false,
 		},
 		{
-			name: "valid facet maximum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "maximum"},
-					{Kind: yaml.ScalarNode, Value: "10.0"},
-				},
-			},
-			wantErr: false,
+			"maximum invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "maximum"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet maximum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "maximum"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			"multipleOf valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "multipleOf"}, {Kind: yaml.ScalarNode, Value: "2.0"}},
+			false,
 		},
 		{
-			name: "valid facet multipleOf",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "multipleOf"},
-					{Kind: yaml.ScalarNode, Value: "2.0"},
-				},
-			},
-			wantErr: false,
+			"multipleOf invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "multipleOf"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet multipleOf",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "multipleOf"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			"format valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "format"}, {Kind: yaml.ScalarNode, Value: "double"}},
+			false,
 		},
 		{
-			name: "valid facet format",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "format"},
-					{Kind: yaml.ScalarNode, Value: "double"},
-				},
-			},
-			wantErr: false,
+			"format invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "format"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			true,
 		},
 		{
-			name: "invalid facet format",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "format"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid facet enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "enum"},
-					{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "1.0"},
-						{Kind: yaml.ScalarNode, Value: "2.0"},
-					}},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid facet enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				FormatFacets: FormatFacets{},
-				NumberFacets: NumberFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "enum"},
-					{Kind: yaml.ScalarNode, Value: "invalid"},
-				},
-			},
-			wantErr: true,
+			// enum non-sequence falls through to custom facets — no error at this level
+			"enum non-sequence falls through",
+			baseWith(t, false),
+			[]*yaml.Node{{Kind: yaml.ScalarNode, Value: "enum"}, {Kind: yaml.ScalarNode, Value: "invalid"}},
+			false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &NumberShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				FormatFacets: tt.fields.FormatFacets,
-				NumberFacets: tt.fields.NumberFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			s := &NumberShape{BaseShape: tt.base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+// ── StringShape ──────────────────────────────────────────────────────────────
+
 func TestStringShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		StringFacets StringFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		facets  StringFacets
+		v       any
 		wantErr bool
 	}{
+		{"valid string", &BaseShape{}, StringFacets{}, "hello", false},
+		{"invalid non-string", &BaseShape{}, StringFacets{}, 123, true},
 		{
-			name: "valid string",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v:   "valid",
-				in1: "test",
-			},
-			wantErr: false,
+			"enum match",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue("ok")}}},
+			StringFacets{},
+			"ok", false,
 		},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
+			"enum miss",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue("ok")}}},
+			StringFacets{},
+			"bad", true,
 		},
 		{
-			name: "valid enum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: "valid"}}},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v:   "valid",
-				in1: "test",
-			},
-			wantErr: false,
+			"pattern match",
+			&BaseShape{}, StringFacets{Pattern: scalarFacetOf(regexp.MustCompile(`^[a-z]+$`))},
+			"abc", false,
 		},
 		{
-			name: "invalid enum value",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: "valid"}}},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
+			"pattern miss",
+			&BaseShape{}, StringFacets{Pattern: scalarFacetOf(regexp.MustCompile(`^[a-z]+$`))},
+			"ABC", true,
 		},
 		{
-			name: "valid pattern",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{Pattern: func() *regexp.Regexp {
-					p := regexp.MustCompile("^[a-z]+$")
-					return p
-				}()},
-			},
-			args: args{
-				v:   "valid",
-				in1: "test",
-			},
-			wantErr: false,
+			"below minLength",
+			&BaseShape{}, StringFacets{LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(6))}},
+			"short", true,
 		},
 		{
-			name: "invalid pattern",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{Pattern: func() *regexp.Regexp {
-					p := regexp.MustCompile("^[a-z]+$")
-					return p
-				}()},
-			},
-			args: args{
-				v:   "INVALID",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid min length",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				v:   "valid",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid min length",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(6)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				v:   "short",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "valid max length",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MaxLength: func() *uint64 {
-							i := uint64(5)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				v:   "valid",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid max length",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MaxLength: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				v:   "too long",
-				in1: "test",
-			},
-			wantErr: true,
+			"above maxLength",
+			&BaseShape{}, StringFacets{LengthFacets: LengthFacets{MaxLength: scalarFacetOf(uint64(4))}},
+			"too long", true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &StringShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				StringFacets: tt.fields.StringFacets,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
+			s := NewTestShapeWithBase(&StringShape{StringFacets: tt.facets}, tt.base)
+			if err := s.BaseShape.Validate(tt.v); (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -1984,214 +756,75 @@ func TestStringShape_Validate(t *testing.T) {
 }
 
 func TestStringShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		StringFacets StringFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    Shape
+		shape   *StringShape
+		source  Shape
 		wantErr bool
 	}{
 		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape:    &BaseShape{Type: "string"},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:    &BaseShape{Type: "string"},
-					EnumFacets:   EnumFacets{},
-					StringFacets: StringFacets{},
-				},
-			},
-			want: &StringShape{
-				BaseShape:    &BaseShape{Type: "string"},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			wantErr: false,
+			"same type",
+			NewTestShapeWithBase(&StringShape{}, &BaseShape{Type: "string"}),
+			makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}}),
+			false,
 		},
 		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape:    &BaseShape{Type: "string"},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				source: &NumberShape{
-					BaseShape:    &BaseShape{Type: "number"},
-					EnumFacets:   EnumFacets{},
-					FormatFacets: FormatFacets{},
-					NumberFacets: NumberFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			NewTestShapeWithBase(&StringShape{}, &BaseShape{Type: "string"}),
+			makeSource(&NumberShape{BaseShape: &BaseShape{Type: "number"}}),
+			true,
 		},
 		{
-			name: "min length constraint violation",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(2)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:  &BaseShape{Type: "string"},
-					EnumFacets: EnumFacets{},
-					StringFacets: StringFacets{
-						LengthFacets: LengthFacets{
-							MinLength: func() *uint64 {
-								i := uint64(4)
-								return &i
-							}(),
-						},
-					},
-				},
-			},
-			wantErr: true,
+			"minLength less restrictive in source",
+			NewTestShapeWithBase(&StringShape{StringFacets: StringFacets{LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(2))}}}, &BaseShape{}),
+			makeSource(&StringShape{BaseShape: &BaseShape{}, StringFacets: StringFacets{LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(4))}}}),
+			true,
 		},
 		{
-			name: "max length constraint violation",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MaxLength: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:  &BaseShape{Type: "string"},
-					EnumFacets: EnumFacets{},
-					StringFacets: StringFacets{
-						LengthFacets: LengthFacets{
-							MaxLength: func() *uint64 {
-								i := uint64(2)
-								return &i
-							}(),
-						},
-					},
-				},
-			},
-			wantErr: true,
+			"maxLength less restrictive in source",
+			NewTestShapeWithBase(&StringShape{StringFacets: StringFacets{LengthFacets: LengthFacets{MaxLength: scalarFacetOf(uint64(4))}}}, &BaseShape{}),
+			makeSource(&StringShape{BaseShape: &BaseShape{}, StringFacets: StringFacets{LengthFacets: LengthFacets{MaxLength: scalarFacetOf(uint64(2))}}}),
+			true,
 		},
 		{
-			name: "enum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: "valid"}}},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:    &BaseShape{Type: "string"},
-					EnumFacets:   EnumFacets{Enum: []*Node{{Value: "invalid"}}},
-					StringFacets: StringFacets{},
-				},
-			},
-			wantErr: true,
+			"enum in source not subset of base",
+			NewTestShapeWithBase(&StringShape{}, &BaseShape{Enum: Nodes{{Value: NewScalarNodeValue("ok")}}}),
+			makeSource(&StringShape{BaseShape: &BaseShape{Type: "string", Enum: Nodes{{Value: NewScalarNodeValue("bad")}}}}),
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &StringShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				StringFacets: tt.fields.StringFacets,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
+			if _, err := tt.shape.BaseShape.Inherit(tt.source.Base()); (err != nil) != tt.wantErr {
 				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Inherit() got = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
 func TestStringShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		StringFacets StringFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		shape   *StringShape
 		wantErr bool
 	}{
 		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			wantErr: false,
+			"valid",
+			&StringShape{BaseShape: &BaseShape{}},
+			false,
 		},
 		{
-			name: "min/max length constraint violation",
-			fields: fields{
-				BaseShape:  &BaseShape{},
-				EnumFacets: EnumFacets{},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(5)
-							return &i
-						}(),
-						MaxLength: func() *uint64 {
-							i := uint64(4)
-							return &i
-						}(),
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "enum constraint violation",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{Enum: []*Node{{Value: 1}}},
-				StringFacets: StringFacets{},
-			},
-			wantErr: true,
+			"minLength greater than maxLength",
+			&StringShape{BaseShape: &BaseShape{}, StringFacets: StringFacets{LengthFacets: LengthFacets{
+				MinLength: scalarFacetOf(uint64(5)),
+				MaxLength: scalarFacetOf(uint64(4)),
+			}}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &StringShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				StringFacets: tt.fields.StringFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
+			if err := tt.shape.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -2199,594 +832,226 @@ func TestStringShape_Check(t *testing.T) {
 }
 
 func TestStringShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		EnumFacets   EnumFacets
-		StringFacets StringFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "empty YAML nodes",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{},
-			},
-			wantErr: false,
+			"empty nodes",
+			&BaseShape{},
+			nil, false,
 		},
 		{
-			name: "odd number of YAML nodes",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "minLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"},
-					{Value: "maxLength"},
-				},
-			},
-			wantErr: true,
+			"minLength valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Value: "minLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			false,
 		},
 		{
-			name: "valid facet minLength",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "minLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: false,
+			"minLength invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "minLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "invalid facet minLength",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "minLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"maxLength valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Value: "maxLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			false,
 		},
 		{
-			name: "valid facet maxLength",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "maxLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: false,
+			"maxLength invalid",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "maxLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "invalid facet maxLength",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "maxLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"pattern valid",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "pattern"}, {Value: "[a-z]", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			false,
 		},
 		{
-			name: "valid facet pattern",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "pattern"}, {Value: "[a-z]", Kind: yaml.ScalarNode, Tag: "!!str"},
-				},
-			},
-			wantErr: false,
+			"pattern invalid regex",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "pattern"}, {Value: "?$", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			true,
 		},
 		{
-			name: "invalid facet pattern",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "pattern"}, {Value: "?$", Kind: yaml.ScalarNode, Tag: "!!str"},
-				},
-			},
-			wantErr: true,
+			"pattern invalid tag",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "pattern"}, {Value: "[a-z]", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "invalid facet pattern tag",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "pattern"}, {Value: "?$", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"invalid enum value node",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "enum"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "invalid enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "enum"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "unknown facet",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-				EnumFacets:   EnumFacets{},
-				StringFacets: StringFacets{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"unknown facet with invalid value",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "unknown"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &StringShape{
-				BaseShape:    tt.fields.BaseShape,
-				EnumFacets:   tt.fields.EnumFacets,
-				StringFacets: tt.fields.StringFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			s := &StringShape{BaseShape: tt.base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+func TestStringShape_Alias(t *testing.T) {
+	srcSame := &StringShape{
+		BaseShape: &BaseShape{Type: "string"},
+		StringFacets: StringFacets{
+			LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(1)), MaxLength: scalarFacetOf(uint64(10))},
+			Pattern:      scalarFacetOf(regexp.MustCompile(`^[a-zA-Z]+$`)),
+		},
+	}
+	s := &StringShape{
+		BaseShape: &BaseShape{Type: "string"},
+		StringFacets: StringFacets{
+			LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(1)), MaxLength: scalarFacetOf(uint64(10))},
+			Pattern:      scalarFacetOf(regexp.MustCompile(`^[a-zA-Z]+$`)),
+		},
+	}
+	t.Run("same type", func(t *testing.T) {
+		got, err := s.alias(srcSame)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, srcSame) {
+			t.Errorf("alias() = %v, want %v", got, srcSame)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&IntegerShape{BaseShape: &BaseShape{Type: "integer"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── FileShape ─────────────────────────────────────────────────────────────────
+
 func TestFileShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		LengthFacets LengthFacets
-		FileFacets   FileFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		facets  LengthFacets
+		v       any
 		wantErr bool
 	}{
+		{"valid string", LengthFacets{}, "file_content", false},
+		{"invalid non-string", LengthFacets{}, 123, true},
 		{
-			name: "valid file shape",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				LengthFacets: LengthFacets{},
-				FileFacets:   FileFacets{},
-			},
-			args: args{
-				v:   "valid_file",
-				in1: "test",
-			},
-			wantErr: false,
+			"above maxLength",
+			LengthFacets{MaxLength: scalarFacetOf(uint64(5))},
+			"valid_file", true,
 		},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape:    &BaseShape{},
-				LengthFacets: LengthFacets{},
-				FileFacets:   FileFacets{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
+			"below minLength",
+			LengthFacets{MinLength: scalarFacetOf(uint64(5))},
+			"v", true,
 		},
 		{
-			name: "valid length facets",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-					MaxLength: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				v:   "valid_file",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid length facets maxLength",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				LengthFacets: LengthFacets{
-					MaxLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				v:   "valid_file",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid length facets minLength",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				v:   "v",
-				in1: "test",
-			},
-			wantErr: true,
+			"exact length match",
+			LengthFacets{MinLength: scalarFacetOf(uint64(10)), MaxLength: scalarFacetOf(uint64(10))},
+			"valid_file", false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &FileShape{
-				BaseShape:    tt.fields.BaseShape,
-				LengthFacets: tt.fields.LengthFacets,
-				FileFacets:   tt.fields.FileFacets,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			s := &FileShape{BaseShape: &BaseShape{}, LengthFacets: tt.facets}
+			if err := s.validate(tt.v, ""); (err != nil) != tt.wantErr {
+				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
 func TestFileShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		LengthFacets LengthFacets
-		FileFacets   FileFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
-		want    Shape
+		shape   *FileShape
+		source  Shape
 		wantErr bool
 	}{
 		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape:    &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{},
-				FileFacets:   FileFacets{},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape:    &BaseShape{Type: "file"},
-					LengthFacets: LengthFacets{},
-					FileFacets:   FileFacets{},
-				},
-			},
-			want: &FileShape{
-				BaseShape:    &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{},
-				FileFacets:   FileFacets{},
-			},
-			wantErr: false,
+			"same type",
+			&FileShape{BaseShape: &BaseShape{Type: "file"}},
+			makeSource(&FileShape{BaseShape: &BaseShape{Type: "file"}}),
+			false,
 		},
 		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape:    &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{},
-				FileFacets:   FileFacets{},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape:    &BaseShape{Type: "string"},
-					EnumFacets:   EnumFacets{},
-					StringFacets: StringFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			&FileShape{BaseShape: &BaseShape{Type: "file"}},
+			makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}}),
+			true,
 		},
 		{
-			name: "valid length facets",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-					MaxLength: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape: &BaseShape{Type: "file"},
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(5)
-							return &i
-						}(),
-						MaxLength: func() *uint64 {
-							i := uint64(10)
-							return &i
-						}(),
-					},
-					FileFacets: FileFacets{},
-				},
-			},
-			want: &FileShape{
-				BaseShape: &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-					MaxLength: func() *uint64 {
-						i := uint64(10)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			wantErr: false,
+			"minLength less restrictive in source",
+			&FileShape{BaseShape: &BaseShape{}, LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(5))}},
+			makeSource(&FileShape{BaseShape: &BaseShape{}, LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(6))}}),
+			true,
 		},
 		{
-			name: "min length constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape: &BaseShape{Type: "file"},
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 {
-							i := uint64(6)
-							return &i
-						}(),
-					},
-					FileFacets: FileFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"maxLength less restrictive in source",
+			&FileShape{BaseShape: &BaseShape{}, LengthFacets: LengthFacets{MaxLength: scalarFacetOf(uint64(5))}},
+			makeSource(&FileShape{BaseShape: &BaseShape{}, LengthFacets: LengthFacets{MaxLength: scalarFacetOf(uint64(3))}}),
+			true,
 		},
 		{
-			name: "max length constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{
-					MaxLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape: &BaseShape{Type: "file"},
-					LengthFacets: LengthFacets{
-						MaxLength: func() *uint64 {
-							i := uint64(3)
-							return &i
-						}(),
-					},
-					FileFacets: FileFacets{},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-		{
-			name: "file types are incompatible",
-			fields: fields{
-				BaseShape:    &BaseShape{Type: "file"},
-				LengthFacets: LengthFacets{},
-				FileFacets: FileFacets{
-					FileTypes: Nodes{
-						{Value: "image/png"},
-					},
-				},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape:    &BaseShape{Type: "file"},
-					LengthFacets: LengthFacets{},
-					FileFacets: FileFacets{
-						FileTypes: Nodes{
-							{Value: "image/jpeg"},
-						},
-					},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible fileTypes",
+			&FileShape{BaseShape: &BaseShape{}, FileFacets: FileFacets{FileTypes: []*Node[string]{{Value: "image/png"}}}},
+			makeSource(&FileShape{BaseShape: &BaseShape{}, FileFacets: FileFacets{FileTypes: []*Node[string]{{Value: "image/jpeg"}}}}),
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &FileShape{
-				BaseShape:    tt.fields.BaseShape,
-				LengthFacets: tt.fields.LengthFacets,
-				FileFacets:   tt.fields.FileFacets,
-			}
-			got, err := s.inherit(tt.args.source)
+			tt.shape.BaseShape.Shape = tt.shape
+			_, err := tt.shape.inherit(tt.source)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Inherit() got = %v, want %v", got, tt.want)
+				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
 func TestFileShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		LengthFacets LengthFacets
-		FileFacets   FileFacets
-	}
 	tests := []struct {
 		name    string
-		fields  fields
+		shape   *FileShape
 		wantErr bool
 	}{
 		{
-			name: "valid file shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-					MaxLength: func() *uint64 {
-						i := uint64(6)
-						return &i
-					}(),
-				},
-				FileFacets: FileFacets{
-					FileTypes: Nodes{
-						{Value: "image/png"},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "minLength must be less than or equal to maxLength",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 {
-						i := uint64(5)
-						return &i
-					}(),
-					MaxLength: func() *uint64 {
-						i := uint64(4)
-						return &i
-					}(),
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "file type must be string",
-			fields: fields{
+			"valid",
+			&FileShape{
 				BaseShape:    &BaseShape{},
-				LengthFacets: LengthFacets{},
-				FileFacets: FileFacets{
-					FileTypes: Nodes{
-						{Value: 1},
-					},
-				},
+				LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(5)), MaxLength: scalarFacetOf(uint64(6))},
+				FileFacets:   FileFacets{FileTypes: []*Node[string]{{Value: "image/png"}}},
 			},
-			wantErr: true,
+			false,
+		},
+		{
+			"minLength greater than maxLength",
+			&FileShape{
+				BaseShape:    &BaseShape{},
+				LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(5)), MaxLength: scalarFacetOf(uint64(4))},
+			},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &FileShape{
-				BaseShape:    tt.fields.BaseShape,
-				LengthFacets: tt.fields.LengthFacets,
-				FileFacets:   tt.fields.FileFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
+			if err := tt.shape.check(); (err != nil) != tt.wantErr {
 				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -2794,239 +1059,128 @@ func TestFileShape_Check(t *testing.T) {
 }
 
 func TestFileShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		LengthFacets LengthFacets
-		FileFacets   FileFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
+			"all valid facets",
+			baseWith(t, true),
+			[]*yaml.Node{
+				{Value: "minLength"}, {Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"},
+				{Value: "maxLength"}, {Value: "10", Kind: yaml.ScalarNode, Tag: "!!float"},
+				{Value: "fileTypes"}, {Kind: yaml.SequenceNode, Content: []*yaml.Node{
+					{Value: "image/png", Kind: yaml.ScalarNode, Tag: "!!str"},
+				}},
+				{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+					{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
+				}},
 			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "minLength"},
-					{Value: "1", Kind: yaml.ScalarNode, Tag: "!!float"},
-					{Value: "maxLength"},
-					{Value: "10", Kind: yaml.ScalarNode, Tag: "!!float"},
-					{Value: "fileTypes"},
-					{
-						Kind: yaml.SequenceNode, Content: []*yaml.Node{
-							{Value: "image/png", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
+			false,
 		},
 		{
-			name: "decode minLength error",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "minLength"},
-					{Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"minLength invalid",
+			&BaseShape{},
+			[]*yaml.Node{{Value: "minLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "decode maxLength error",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "maxLength"},
-					{Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"maxLength invalid",
+			&BaseShape{},
+			[]*yaml.Node{{Value: "maxLength"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 		{
-			name: "fileTypes must be sequence node",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "fileTypes"},
-					{Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!str"},
-				},
-			},
-			wantErr: true,
+			"fileTypes must be sequence",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "fileTypes"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			true,
 		},
 		{
-			name: "member of fileTypes must be string",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "fileTypes"},
-					{
-						Kind: yaml.SequenceNode, Content: []*yaml.Node{
-							{Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-						},
-					},
-				},
-			},
-			wantErr: true,
+			"fileTypes item must be string tag",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "fileTypes"}, {Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Value: "image/png", Kind: yaml.ScalarNode, Tag: "!!float"},
+			}}},
+			true,
 		},
 		{
-			name: "make node fileTypes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "fileTypes"},
-					{
-						Kind: yaml.SequenceNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
+			"fileTypes item invalid node",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "fileTypes"}, {Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Value: "1.5", Kind: yaml.ScalarNode, Tag: "!!float"},
+			}}},
+			true,
 		},
 		{
-			name: "odd number of YAML nodes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "unknown facet error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"},
-				},
-			},
-			wantErr: true,
+			"unknown facet with invalid value",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "unknown"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!float"}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &FileShape{
-				BaseShape:    tt.fields.BaseShape,
-				LengthFacets: tt.fields.LengthFacets,
-				FileFacets:   tt.fields.FileFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			s := &FileShape{BaseShape: tt.base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
+func TestFileShape_Alias(t *testing.T) {
+	src := &FileShape{
+		BaseShape:    &BaseShape{Type: "file"},
+		FileFacets:   FileFacets{FileTypes: []*Node[string]{{Value: "image/png"}, {Value: "image/jpeg"}}},
+		LengthFacets: LengthFacets{MinLength: scalarFacetOf(uint64(1)), MaxLength: scalarFacetOf(uint64(10))},
+	}
+	s := &FileShape{BaseShape: &BaseShape{Type: "file"}}
+	t.Run("same type", func(t *testing.T) {
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── BooleanShape ─────────────────────────────────────────────────────────────
+
 func TestBooleanShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		EnumFacets EnumFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		v       any
 		wantErr bool
 	}{
 		{
-			name: "valid boolean shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: true},
-					},
-				},
-			},
-			args: args{
-				v:   true,
-				in1: "test",
-			},
-			wantErr: false,
+			"valid bool in enum",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue(true)}}},
+			true, false,
 		},
+		{"invalid non-bool", &BaseShape{}, 123, true},
 		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid enum",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: "true"},
-					},
-				},
-			},
-			args: args{
-				v: false,
-			},
-			wantErr: true,
+			"enum miss",
+			&BaseShape{Enum: Nodes{{Value: NewScalarNodeValue("true")}}},
+			false, true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &BooleanShape{
-				BaseShape:  tt.fields.BaseShape,
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
+			s := NewTestShapeWithBase(&BooleanShape{}, tt.base)
+			if err := s.BaseShape.Validate(tt.v); (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -3034,2438 +1188,584 @@ func TestBooleanShape_Validate(t *testing.T) {
 }
 
 func TestBooleanShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		EnumFacets EnumFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
+		name        string
+		shape       *BooleanShape
+		source      Shape
+		wantErr     bool
+		wantEnumLen int // 0 = don't check
 	}{
 		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					Type: "boolean",
-				},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: true},
-					},
-				},
-			},
-			args: args{
-				source: &BooleanShape{
-					BaseShape: &BaseShape{
-						Type: "boolean",
-					},
-					EnumFacets: EnumFacets{
-						Enum: []*Node{
-							{Value: true},
-							{Value: false},
-						},
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotBool, ok := got.(*BooleanShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if len(gotBool.EnumFacets.Enum) != 1 {
-					return "unexpected enum length", false
-				}
-				if gotBool.EnumFacets.Enum[0].Value != true {
-					return "unexpected enum value", false
-				}
-				return "", true
-			},
-			wantErr: false,
+			"inherits enum from source when base has none",
+			NewTestShapeWithBase(&BooleanShape{}, &BaseShape{Type: "boolean"}),
+			makeSource(&BooleanShape{BaseShape: &BaseShape{Type: "boolean", Enum: Nodes{
+				{Value: NewScalarNodeValue(true)}, {Value: NewScalarNodeValue(false)},
+			}}}),
+			false, 2,
 		},
 		{
-			name: "positive case with nil enum",
-			fields: fields{
-				BaseShape: &BaseShape{
-					Type: "boolean",
-				},
-			},
-			args: args{
-				source: &BooleanShape{
-					BaseShape: &BaseShape{
-						Type: "boolean",
-					},
-					EnumFacets: EnumFacets{
-						Enum: []*Node{
-							{Value: true},
-							{Value: false},
-						},
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotBool, ok := got.(*BooleanShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if len(gotBool.EnumFacets.Enum) != 2 {
-					return "unexpected enum length", false
-				}
-				if gotBool.EnumFacets.Enum[0].Value != true {
-					return "unexpected enum value", false
-				}
-				if gotBool.EnumFacets.Enum[1].Value != false {
-					return "unexpected enum value", false
-				}
-				return "", true
-			},
-			wantErr: false,
+			"base enum restricts source enum",
+			NewTestShapeWithBase(&BooleanShape{}, &BaseShape{Type: "boolean", Enum: Nodes{
+				{Value: NewScalarNodeValue(true)},
+			}}),
+			makeSource(&BooleanShape{BaseShape: &BaseShape{Type: "boolean", Enum: Nodes{
+				{Value: NewScalarNodeValue(true)}, {Value: NewScalarNodeValue(false)},
+			}}}),
+			false, 1,
 		},
 		{
-			name: "cannot inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{
-					Type: "boolean",
-				},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{
-						Type: "string",
-					},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"enum constraint violation",
+			NewTestShapeWithBase(&BooleanShape{}, &BaseShape{Type: "boolean", Enum: Nodes{
+				{Value: NewScalarNodeValue(true)},
+			}}),
+			makeSource(&BooleanShape{BaseShape: &BaseShape{Type: "boolean", Enum: Nodes{
+				{Value: NewScalarNodeValue(false)},
+			}}}),
+			true, 0,
 		},
 		{
-			name: "enum constraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{
-					Type: "boolean",
-				},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: true},
-					},
-				},
-			},
-			args: args{
-				source: &BooleanShape{
-					BaseShape: &BaseShape{
-						Type: "boolean",
-					},
-					EnumFacets: EnumFacets{
-						Enum: []*Node{
-							{Value: false},
-						},
-					},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			NewTestShape(&BooleanShape{}, 1),
+			makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}}),
+			true, 0,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &BooleanShape{
-				BaseShape:  tt.fields.BaseShape,
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			got, err := s.inherit(tt.args.source)
+			got, err := tt.shape.BaseShape.Inherit(tt.source.Base())
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if message, passed := tt.want(got); !passed {
-				t.Errorf("Case hasn't been passed: %s", message)
-			}
-		})
-	}
-}
-
-func TestBooleanShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		EnumFacets EnumFacets
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: true},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "enum value must be boolean",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				EnumFacets: EnumFacets{
-					Enum: []*Node{
-						{Value: 1},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &BooleanShape{
-				BaseShape:  tt.fields.BaseShape,
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantEnumLen > 0 && len(got.Enum) != tt.wantEnumLen {
+				t.Errorf("Inherit() enum len = %d, want %d", len(got.Enum), tt.wantEnumLen)
 			}
 		})
 	}
 }
 
 func TestBooleanShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		EnumFacets EnumFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "enum"},
-					{
-						Kind: yaml.SequenceNode, Content: []*yaml.Node{
-							{Value: "true", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "false", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "make enum error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "enum"},
-					{
-						Kind: yaml.SequenceNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &BooleanShape{
-				BaseShape:  tt.fields.BaseShape,
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	t.Run("custom facet", func(t *testing.T) {
+		s := &BooleanShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &BooleanShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}
+		if err := s.unmarshalYAMLNodes(nodes); err == nil {
+			t.Error("expected error for alias node")
+		}
+	})
 }
 
+func TestBooleanShape_Alias(t *testing.T) {
+	s := &BooleanShape{BaseShape: &BaseShape{Type: "boolean"}}
+	t.Run("same type", func(t *testing.T) {
+		src := &BooleanShape{BaseShape: &BaseShape{Type: "boolean"}}
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── DateTimeShape ─────────────────────────────────────────────────────────────
+
 func TestDateTimeShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		FormatFacets FormatFacets
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		format  string // empty = no format facet
+		v       any
 		wantErr bool
 	}{
-		{
-			name: "positive case with rfc3339",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						s := "rfc3339"
-						return &s
-					}(),
-				},
-			},
-			args: args{
-				v:   "2021-01-01T00:00:00Z",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "positive case with rfc2616",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						s := "rfc2616"
-						return &s
-					}(),
-				},
-			},
-			args: args{
-				v:   "Sun, 06 Nov 1994 08:49:37 GMT",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "positive case without format",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "2021-01-01T00:00:00Z",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid value",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid case with rfc3339",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						s := "rfc3339"
-						return &s
-					}(),
-				},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid case with rfc2616",
-			fields: fields{
-				BaseShape: &BaseShape{},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						s := "rfc2616"
-						return &s
-					}(),
-				},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
-		},
+		{"rfc3339 valid", "rfc3339", "2021-01-01T00:00:00Z", false},
+		{"rfc3339 invalid", "rfc3339", "invalid", true},
+		{"rfc2616 valid", "rfc2616", "Sun, 06 Nov 1994 08:49:37 GMT", false},
+		{"rfc2616 invalid", "rfc2616", "invalid", true},
+		{"no format defaults to rfc3339", "", "2021-01-01T00:00:00Z", false},
+		{"no format invalid value", "", "invalid", true},
+		{"invalid type", "", 123, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeShape{
-				BaseShape:    tt.fields.BaseShape,
-				FormatFacets: tt.fields.FormatFacets,
+			s := &DateTimeShape{BaseShape: &BaseShape{}}
+			if tt.format != "" {
+				s.FormatFacets = FormatFacets{Format: scalarFacetOf(tt.format)}
 			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			if err := s.validate(tt.v, ""); (err != nil) != tt.wantErr {
+				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
 func TestDateTimeShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		FormatFacets FormatFacets
-	}
-	type args struct {
-		source Shape
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
+		name       string
+		shape      *DateTimeShape
+		source     Shape
+		wantErr    bool
+		wantFormat string
 	}{
 		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime"},
-			},
-			args: args{
-				source: &DateTimeShape{
-					BaseShape: &BaseShape{Type: "datetime"},
-					FormatFacets: FormatFacets{
-						Format: func() *string {
-							s := "rfc3339"
-							return &s
-						}(),
-					},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotDateTime, ok := got.(*DateTimeShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotDateTime.FormatFacets.Format == nil {
-					return "format is nil", false
-				}
-				if *gotDateTime.FormatFacets.Format != "rfc3339" {
-					return "unexpected format", false
-				}
-				return "", true
-			},
-			wantErr: false,
+			"inherits format from source",
+			&DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}},
+			makeSource(&DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}, FormatFacets: FormatFacets{Format: scalarFacetOf("rfc3339")}}),
+			false, "rfc3339",
 		},
 		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"format conflict",
+			&DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}, FormatFacets: FormatFacets{Format: scalarFacetOf("rfc3339")}},
+			makeSource(&DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}, FormatFacets: FormatFacets{Format: scalarFacetOf("rfc2616")}}),
+			true, "",
 		},
 		{
-			name: "format contraint violation",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime"},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						s := "rfc3339"
-						return &s
-					}(),
-				},
-			},
-			args: args{
-				source: &DateTimeShape{
-					BaseShape: &BaseShape{Type: "datetime"},
-					FormatFacets: FormatFacets{
-						Format: func() *string {
-							s := "rfc2616"
-							return &s
-						}(),
-					},
-				},
-			},
-			want:    nil,
-			wantErr: true,
+			"incompatible type",
+			&DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}},
+			makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}}),
+			true, "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeShape{
-				BaseShape:    tt.fields.BaseShape,
-				FormatFacets: tt.fields.FormatFacets,
-			}
-			got, err := s.inherit(tt.args.source)
+			tt.shape.BaseShape.Shape = tt.shape
+			got, err := tt.shape.inherit(tt.source)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("inherit() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if message, passed := tt.want(got); !passed {
-				t.Errorf("Case hasn't been passed: %s", message)
+			if tt.wantFormat != "" {
+				gotDT, ok := got.(*DateTimeShape)
+				if !ok || gotDT.FormatFacets.Format == nil || gotDT.FormatFacets.Format.Value != tt.wantFormat {
+					t.Errorf("inherit() format = %v, want %q", got, tt.wantFormat)
+				}
 			}
 		})
 	}
 }
 
 func TestDateTimeShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		FormatFacets FormatFacets
-	}
-	type args struct {
-		v []*yaml.Node
-	}
 	tests := []struct {
 		name    string
-		fields  fields
-		args    args
+		base    *BaseShape
+		nodes   []*yaml.Node
 		wantErr bool
 	}{
 		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "format"},
-					{Value: "rfc3339", Kind: yaml.ScalarNode, Tag: "!!str"},
-					{Value: "custom"},
-					{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-				},
-			},
-			wantErr: false,
+			"format valid",
+			baseWith(t, true),
+			[]*yaml.Node{{Value: "format"}, {Value: "rfc3339", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			false,
 		},
 		{
-			name: "invalid format",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "format"},
-					{Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!str"},
-				},
-			},
-			wantErr: true,
+			"format invalid value",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "format"}, {Value: "invalid", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			true,
 		},
 		{
-			name: "missing value",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "format"},
-				},
-			},
-			wantErr: true,
+			"format wrong tag",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "format"}, {Value: "rfc3339", Kind: yaml.ScalarNode, Tag: "!!int"}},
+			true,
 		},
 		{
-			name: "invalid decode value",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "format"},
-					{Value: "rfc3339", Kind: yaml.ScalarNode, Tag: "!!int"},
-				},
-			},
-			wantErr: true,
+			"custom facet valid",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "custom"}, {Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"}},
+			false,
 		},
 		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
+			"alias node causes error",
+			baseWith(t, false),
+			[]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}},
+			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeShape{
-				BaseShape:    tt.fields.BaseShape,
-				FormatFacets: tt.fields.FormatFacets,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
+			s := &DateTimeShape{BaseShape: tt.base}
+			if err := s.unmarshalYAMLNodes(tt.nodes); (err != nil) != tt.wantErr {
 				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestDateTimeShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		FormatFacets FormatFacets
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeShape{
-				BaseShape:    tt.fields.BaseShape,
-				FormatFacets: tt.fields.FormatFacets,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+func TestDateTimeShape_Alias(t *testing.T) {
+	s := &DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}, FormatFacets: FormatFacets{Format: scalarFacetOf("rfc3339")}}
+	src := &DateTimeShape{BaseShape: &BaseShape{Type: "datetime"}, FormatFacets: FormatFacets{Format: scalarFacetOf("rfc3339")}}
+	t.Run("same type", func(t *testing.T) {
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }
 
+// ── DateTimeOnlyShape ─────────────────────────────────────────────────────────
+
 func TestDateTimeOnlyShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
+	s := &DateTimeOnlyShape{BaseShape: &BaseShape{}}
+	for _, tc := range []struct {
+		v       any
 		wantErr bool
 	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "2021-01-01T00:00:00",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid value",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+		{"2021-01-01T00:00:00", false},
+		{"invalid", true},
+		{123, true},
+	} {
+		if err := s.validate(tc.v, ""); (err != nil) != tc.wantErr {
+			t.Errorf("validate(%v) error = %v, wantErr %v", tc.v, err, tc.wantErr)
+		}
 	}
 }
 
 func TestDateTimeOnlyShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
-	}{
-		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime-only"},
-			},
-			args: args{
-				source: &DateTimeOnlyShape{
-					BaseShape: &BaseShape{Type: "datetime-only"},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotDateTime, ok := got.(*DateTimeOnlyShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotDateTime.Type != "datetime-only" {
-					return "unexpected type", false
-				}
-				return "", true
-			},
-			wantErr: false,
-		},
-		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime-only"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if message, passed := tt.want(got); !passed {
-				t.Errorf("Case hasn't been passed: %s", message)
-			}
-		})
-	}
-}
-
-func TestDateTimeOnlyShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	s := &DateTimeOnlyShape{BaseShape: &BaseShape{Type: "datetime-only"}}
+	s.BaseShape.Shape = s
+	t.Run("same type", func(t *testing.T) {
+		src := makeSource(&DateTimeOnlyShape{BaseShape: &BaseShape{Type: "datetime-only"}})
+		if _, err := s.inherit(src); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		src := makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}})
+		if _, err := s.inherit(src); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }
 
 func TestDateTimeOnlyShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "odd number of YAML nodes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	t.Run("custom facet valid", func(t *testing.T) {
+		s := &DateTimeOnlyShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &DateTimeOnlyShape{BaseShape: baseWith(t, false)}
+		if err := s.unmarshalYAMLNodes([]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}); err == nil {
+			t.Error("expected error")
+		}
+	})
 }
 
+func TestDateTimeOnlyShape_Alias(t *testing.T) {
+	s := &DateTimeOnlyShape{BaseShape: &BaseShape{Type: "datetime-only"}}
+	t.Run("same type", func(t *testing.T) {
+		src := &DateTimeOnlyShape{BaseShape: &BaseShape{Type: "datetime-only"}}
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── DateOnlyShape ─────────────────────────────────────────────────────────────
+
 func TestDateOnlyShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
+	s := &DateOnlyShape{BaseShape: &BaseShape{}}
+	for _, tc := range []struct {
+		v       any
 		wantErr bool
 	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "2021-01-01",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid value",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+		{"2021-01-01", false},
+		{"invalid", true},
+		{123, true},
+	} {
+		if err := s.validate(tc.v, ""); (err != nil) != tc.wantErr {
+			t.Errorf("validate(%v) error = %v, wantErr %v", tc.v, err, tc.wantErr)
+		}
 	}
 }
 
 func TestDateOnlyShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
-	}{
-		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "date-only"},
-			},
-			args: args{
-				source: &DateOnlyShape{
-					BaseShape: &BaseShape{Type: "date-only"},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotDate, ok := got.(*DateOnlyShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotDate.Type != "date-only" {
-					return "unexpected type", false
-				}
-				return "", true
-			},
-			wantErr: false,
-		},
-		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "date-only"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if message, passed := tt.want(got); !passed {
-				t.Errorf("Case hasn't been passed: %s", message)
-			}
-		})
-	}
-}
-
-func TestDateOnlyShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	s := &DateOnlyShape{BaseShape: &BaseShape{Type: "date-only"}}
+	s.BaseShape.Shape = s
+	t.Run("same type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&DateOnlyShape{BaseShape: &BaseShape{Type: "date-only"}})); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}})); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }
 
 func TestDateOnlyShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	t.Run("custom facet valid", func(t *testing.T) {
+		s := &DateOnlyShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &DateOnlyShape{BaseShape: baseWith(t, false)}
+		if err := s.unmarshalYAMLNodes([]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}); err == nil {
+			t.Error("expected error")
+		}
+	})
 }
 
+// ── TimeOnlyShape ─────────────────────────────────────────────────────────────
+
 func TestTimeOnlyShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
+	s := &TimeOnlyShape{BaseShape: &BaseShape{}}
+	for _, tc := range []struct {
+		v       any
 		wantErr bool
 	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "00:00:00",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid type",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   123,
-				in1: "test",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid value",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &TimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+		{"00:00:00", false},
+		{"invalid", true},
+		{123, true},
+	} {
+		if err := s.validate(tc.v, ""); (err != nil) != tc.wantErr {
+			t.Errorf("validate(%v) error = %v, wantErr %v", tc.v, err, tc.wantErr)
+		}
 	}
 }
 
 func TestTimeOnlyShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
-	}{
-		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "time-only"},
-			},
-			args: args{
-				source: &TimeOnlyShape{
-					BaseShape: &BaseShape{Type: "time-only"},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotTime, ok := got.(*TimeOnlyShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotTime.Type != "time-only" {
-					return "unexpected type", false
-				}
-				return "", true
-			},
-			wantErr: false,
-		},
-		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "time-only"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &TimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if message, passed := tt.want(got); !passed {
-				t.Errorf("Case hasn't been passed: %s", message)
-			}
-		})
-	}
-}
-
-func TestTimeOnlyShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &TimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	s := &TimeOnlyShape{BaseShape: &BaseShape{Type: "time-only"}}
+	s.BaseShape.Shape = s
+	t.Run("same type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&TimeOnlyShape{BaseShape: &BaseShape{Type: "time-only"}})); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}})); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }
 
 func TestTimeOnlyShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "odd number of YAML nodes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &TimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
+	t.Run("custom facet valid", func(t *testing.T) {
+		s := &TimeOnlyShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &TimeOnlyShape{BaseShape: baseWith(t, false)}
+		if err := s.unmarshalYAMLNodes([]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}); err == nil {
+			t.Error("expected error")
+		}
+	})
 }
 
+func TestTimeOnlyShape_Alias(t *testing.T) {
+	s := &TimeOnlyShape{BaseShape: &BaseShape{Type: "time-only"}}
+	t.Run("same type", func(t *testing.T) {
+		src := &TimeOnlyShape{BaseShape: &BaseShape{Type: "time-only"}}
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── AnyShape ──────────────────────────────────────────────────────────────────
+
 func TestAnyShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		in0 interface{}
-		in1 string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				in0: "test",
-				in1: "test",
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &AnyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.validate(tt.args.in0, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+	s := &AnyShape{BaseShape: &BaseShape{}}
+	if err := s.validate("anything", ""); err != nil {
+		t.Errorf("AnyShape.validate() unexpected error: %v", err)
 	}
 }
 
 func TestAnyShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
-	}{
-		{
-			name: "inherit from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "any"},
-			},
-			args: args{
-				source: &AnyShape{
-					BaseShape: &BaseShape{Type: "any"},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotAny, ok := got.(*AnyShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotAny.Type != "any" {
-					return "unexpected type", false
-				}
-				return "", true
-			},
-		},
-		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "any"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &AnyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if (err != nil) == tt.wantErr {
-				return
-			}
-			if tt.want != nil {
-				if message, passed := tt.want(got); !passed {
-					t.Errorf("Case hasn't been passed: %s", message)
-				}
-			}
-		})
-	}
+	s := &AnyShape{BaseShape: &BaseShape{Type: "any"}}
+	s.BaseShape.Shape = s
+	t.Run("same type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&AnyShape{BaseShape: &BaseShape{Type: "any"}})); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}})); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }
 
 func TestAnyShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case with all facets",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "odd number of YAML nodes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &AnyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestNilShape_Validate(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v   interface{}
-		in1 string
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   nil,
-				in1: "test",
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid value",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			args: args{
-				v:   "invalid",
-				in1: "test",
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &NilShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.validate(tt.args.v, tt.args.in1); (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestNilShape_Inherit(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    func(got Shape) (string, bool)
-		wantErr bool
-	}{
-		{
-			name: "inherit from nil",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "nil"},
-			},
-			args: args{
-				source: &NilShape{
-					BaseShape: &BaseShape{Type: "nil"},
-				},
-			},
-			want: func(got Shape) (string, bool) {
-				gotNil, ok := got.(*NilShape)
-				if !ok {
-					return "unexpected type", false
-				}
-				if gotNil.Type != "nil" {
-					return "unexpected type", false
-				}
-				return "", true
-			},
-			wantErr: false,
-		},
-		{
-			name: "inherit from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "nil"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &NilShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.inherit(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Inherit() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if tt.want != nil {
-				if message, passed := tt.want(got); !passed {
-					t.Errorf("Case hasn't been passed: %s", message)
-				}
-			}
-		})
-	}
-}
-
-func TestNilShape_Check(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		wantErr bool
-	}{
-		{
-			name: "valid shape",
-			fields: fields{
-				BaseShape: &BaseShape{},
-			},
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &NilShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.check(); (err != nil) != tt.wantErr {
-				t.Errorf("check() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestNilShape_unmarshalYAMLNodes(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		v []*yaml.Node
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		{
-			name: "positive case",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{
-						Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str",
-					},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
-							{Value: "value", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "odd number of YAML nodes error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "unknown"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "make node error",
-			fields: fields{
-				BaseShape: &BaseShape{
-					CustomShapeFacets: orderedmap.New[string, *Node](0),
-				},
-			},
-			args: args{
-				v: []*yaml.Node{
-					{Value: "custom"},
-					{
-						Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Value: "{", Kind: yaml.ScalarNode, Tag: "!!str"},
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &NilShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			if err := s.unmarshalYAMLNodes(tt.args.v); (err != nil) != tt.wantErr {
-				t.Errorf("unmarshalYAMLNodes() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-func TestBooleanShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		EnumFacets EnumFacets
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "boolean"},
-			},
-			args: args{
-				source: &BooleanShape{
-					BaseShape: &BaseShape{Type: "boolean"},
-				},
-			},
-			want: &BooleanShape{
-				BaseShape: &BaseShape{Type: "boolean"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "boolean"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &BooleanShape{
-				BaseShape:  tt.fields.BaseShape,
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("BooleanShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("BooleanShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-func TestIntegerShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape     *BaseShape
-		EnumFacets    EnumFacets
-		FormatFacets  FormatFacets
-		IntegerFacets IntegerFacets
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "integer"},
-				IntegerFacets: IntegerFacets{
-					Minimum: big.NewInt(1),
-					Maximum: big.NewInt(10),
-				},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape: &BaseShape{Type: "integer"},
-					IntegerFacets: IntegerFacets{
-						Minimum: big.NewInt(1),
-						Maximum: big.NewInt(10),
-					},
-				},
-			},
-			want: &IntegerShape{
-				BaseShape: &BaseShape{Type: "integer"},
-				IntegerFacets: IntegerFacets{
-					Minimum: big.NewInt(1),
-					Maximum: big.NewInt(10),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "integer"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &IntegerShape{
-				BaseShape:     tt.fields.BaseShape,
-				EnumFacets:    tt.fields.EnumFacets,
-				FormatFacets:  tt.fields.FormatFacets,
-				IntegerFacets: tt.fields.IntegerFacets,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("IntegerShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("IntegerShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-func TestStringShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape  *BaseShape
-		MinLength  *uint64
-		MaxLength  *uint64
-		Pattern    *regexp.Regexp
-		EnumFacets EnumFacets
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "string"},
-				MinLength: func() *uint64 { v := uint64(1); return &v }(),
-				MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-				Pattern:   regexp.MustCompile(`^[a-zA-Z]+$`),
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-					StringFacets: StringFacets{
-						LengthFacets: LengthFacets{
-							MinLength: func() *uint64 { v := uint64(1); return &v }(),
-							MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-						},
-						Pattern: regexp.MustCompile(`^[a-zA-Z]+$`),
-					},
-				},
-			},
-			want: &StringShape{
-				BaseShape: &BaseShape{Type: "string"},
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 { v := uint64(1); return &v }(),
-						MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-					},
-					Pattern: regexp.MustCompile(`^[a-zA-Z]+$`),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "string"},
-			},
-			args: args{
-				source: &IntegerShape{
-					BaseShape: &BaseShape{Type: "integer"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &StringShape{
-				BaseShape: tt.fields.BaseShape,
-				StringFacets: StringFacets{
-					LengthFacets: LengthFacets{
-						MinLength: tt.fields.MinLength,
-						MaxLength: tt.fields.MaxLength,
-					},
-					Pattern: tt.fields.Pattern,
-				},
-				EnumFacets: tt.fields.EnumFacets,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("StringShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("StringShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-func TestFileShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-		MinLength *uint64
-		MaxLength *uint64
-		FileTypes Nodes
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "file"},
-				MinLength: func() *uint64 { v := uint64(1); return &v }(),
-				MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-				FileTypes: Nodes{
-					{Value: "image/png"},
-					{Value: "image/jpeg"},
-				},
-			},
-			args: args{
-				source: &FileShape{
-					BaseShape: &BaseShape{Type: "file"},
-					FileFacets: FileFacets{
-						FileTypes: Nodes{
-							{Value: "image/png"},
-							{Value: "image/jpeg"},
-						},
-					},
-					LengthFacets: LengthFacets{
-						MinLength: func() *uint64 { v := uint64(1); return &v }(),
-						MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-					},
-				},
-			},
-			want: &FileShape{
-				BaseShape: &BaseShape{Type: "file"},
-				FileFacets: FileFacets{
-					FileTypes: Nodes{
-						{Value: "image/png"},
-						{Value: "image/jpeg"},
-					},
-				},
-				LengthFacets: LengthFacets{
-					MinLength: func() *uint64 { v := uint64(1); return &v }(),
-					MaxLength: func() *uint64 { v := uint64(10); return &v }(),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "file"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &FileShape{
-				BaseShape: tt.fields.BaseShape,
-				FileFacets: FileFacets{
-					FileTypes: tt.fields.FileTypes,
-				},
-				LengthFacets: LengthFacets{
-					MinLength: tt.fields.MinLength,
-					MaxLength: tt.fields.MaxLength,
-				},
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("FileShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("FileShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-func TestDateTimeShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape    *BaseShape
-		FormatFacets FormatFacets
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime"},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						format := "rfc3339"
-						return &format
-					}(),
-				},
-			},
-			args: args{
-				source: &DateTimeShape{
-					BaseShape: &BaseShape{Type: "datetime"},
-					FormatFacets: FormatFacets{
-						Format: func() *string {
-							format := "rfc3339"
-							return &format
-						}(),
-					},
-				},
-			},
-			want: &DateTimeShape{
-				BaseShape: &BaseShape{Type: "datetime"},
-				FormatFacets: FormatFacets{
-					Format: func() *string {
-						format := "rfc3339"
-						return &format
-					}(),
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeShape{
-				BaseShape:    tt.fields.BaseShape,
-				FormatFacets: tt.fields.FormatFacets,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DateTimeShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("DateTimeShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDateTimeOnlyShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime-only"},
-			},
-			args: args{
-				source: &DateTimeOnlyShape{
-					BaseShape: &BaseShape{Type: "datetime-only"},
-				},
-			},
-			want: &DateTimeOnlyShape{
-				BaseShape: &BaseShape{Type: "datetime-only"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "datetime-only"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &DateTimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DateTimeOnlyShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("DateTimeOnlyShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestTimeOnlyShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "time-only"},
-			},
-			args: args{
-				source: &TimeOnlyShape{
-					BaseShape: &BaseShape{Type: "time-only"},
-				},
-			},
-			want: &TimeOnlyShape{
-				BaseShape: &BaseShape{Type: "time-only"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "time-only"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &TimeOnlyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("TimeOnlyShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("TimeOnlyShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
+	t.Run("custom facet valid", func(t *testing.T) {
+		s := &AnyShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &AnyShape{BaseShape: baseWith(t, false)}
+		if err := s.unmarshalYAMLNodes([]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}); err == nil {
+			t.Error("expected error")
+		}
+	})
 }
 
 func TestAnyShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "any"},
-			},
-			args: args{
-				source: &AnyShape{
-					BaseShape: &BaseShape{Type: "any"},
-				},
-			},
-			want: &AnyShape{
-				BaseShape: &BaseShape{Type: "any"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "any"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &AnyShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("AnyShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("AnyShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
+	s := &AnyShape{BaseShape: &BaseShape{Type: "any"}}
+	t.Run("same type", func(t *testing.T) {
+		src := &AnyShape{BaseShape: &BaseShape{Type: "any"}}
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+// ── NilShape ──────────────────────────────────────────────────────────────────
+
+func TestNilShape_Validate(t *testing.T) {
+	s := &NilShape{BaseShape: &BaseShape{}}
+	t.Run("nil value valid", func(t *testing.T) {
+		if err := s.validate(nil, ""); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("non-nil value invalid", func(t *testing.T) {
+		if err := s.validate("value", ""); err == nil {
+			t.Error("expected error for non-nil value")
+		}
+	})
+}
+
+func TestNilShape_Inherit(t *testing.T) {
+	s := &NilShape{BaseShape: &BaseShape{Type: "nil"}}
+	s.BaseShape.Shape = s
+	t.Run("same type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&NilShape{BaseShape: &BaseShape{Type: "nil"}})); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.inherit(makeSource(&StringShape{BaseShape: &BaseShape{Type: "string"}})); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
+}
+
+func TestNilShape_unmarshalYAMLNodes(t *testing.T) {
+	t.Run("custom facet valid", func(t *testing.T) {
+		s := &NilShape{BaseShape: baseWith(t, false)}
+		nodes := []*yaml.Node{
+			{Value: "custom", Kind: yaml.ScalarNode, Tag: "!!str"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Value: "key", Kind: yaml.ScalarNode, Tag: "!!str"},
+				{Value: "val", Kind: yaml.ScalarNode, Tag: "!!str"},
+			}},
+		}
+		if err := s.unmarshalYAMLNodes(nodes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("alias node causes error", func(t *testing.T) {
+		s := &NilShape{BaseShape: baseWith(t, false)}
+		if err := s.unmarshalYAMLNodes([]*yaml.Node{{Value: "custom"}, {Kind: yaml.AliasNode}}); err == nil {
+			t.Error("expected error")
+		}
+	})
 }
 
 func TestNilShape_Alias(t *testing.T) {
-	type fields struct {
-		BaseShape *BaseShape
-	}
-	type args struct {
-		source Shape
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    Shape
-		wantErr bool
-	}{
-		{
-			name: "alias from same type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "nil"},
-			},
-			args: args{
-				source: &NilShape{
-					BaseShape: &BaseShape{Type: "nil"},
-				},
-			},
-			want: &NilShape{
-				BaseShape: &BaseShape{Type: "nil"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "alias from different type",
-			fields: fields{
-				BaseShape: &BaseShape{Type: "nil"},
-			},
-			args: args{
-				source: &StringShape{
-					BaseShape: &BaseShape{Type: "string"},
-				},
-			},
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &NilShape{
-				BaseShape: tt.fields.BaseShape,
-			}
-			got, err := s.alias(tt.args.source)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NilShape.alias() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NilShape.alias() = %v, want %v", got, tt.want)
-			}
-		})
-	}
+	s := &NilShape{BaseShape: &BaseShape{Type: "nil"}}
+	t.Run("same type", func(t *testing.T) {
+		src := &NilShape{BaseShape: &BaseShape{Type: "nil"}}
+		got, err := s.alias(src)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("alias() = %v, want %v", got, src)
+		}
+	})
+	t.Run("incompatible type", func(t *testing.T) {
+		if _, err := s.alias(&StringShape{BaseShape: &BaseShape{Type: "string"}}); err == nil {
+			t.Error("expected error for incompatible type")
+		}
+	})
 }

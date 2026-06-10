@@ -1,45 +1,37 @@
-// Code generated from ./rdtParser.g4 by ANTLR 4.13.2. DO NOT EDIT.
+// Code generated from ./RdtParser.g4 by ANTLR 4.13.2. DO NOT EDIT.
 
-package rdt // rdtParser
+package rdt // RdtParser
 
 import "github.com/antlr4-go/antlr/v4"
 
-type BaserdtParserVisitor struct {
+type BaseRdtParserVisitor struct {
 	*antlr.BaseParseTreeVisitor
 }
 
-func (v *BaserdtParserVisitor) VisitEntrypoint(ctx *EntrypointContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitEntrypoint(ctx *EntrypointContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitExpression(ctx *ExpressionContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitExpression(ctx *ExpressionContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitType(ctx *TypeContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitUnion(ctx *UnionContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitPrimitive(ctx *PrimitiveContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitType(ctx *TypeContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitOptional(ctx *OptionalContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitPrimitive(ctx *PrimitiveContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitArray(ctx *ArrayContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitGroup(ctx *GroupContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaserdtParserVisitor) VisitUnion(ctx *UnionContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaserdtParserVisitor) VisitGroup(ctx *GroupContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaserdtParserVisitor) VisitReference(ctx *ReferenceContext) interface{} {
+func (v *BaseRdtParserVisitor) VisitReference(ctx *ReferenceContext) interface{} {
 	return v.VisitChildren(ctx)
 }
