@@ -1,6 +1,6 @@
 module github.com/acronis/go-raml/cmd/raml-lsp
 
-go 1.22
+go 1.23
 
 require (
 	github.com/acronis/go-raml/v3 v3.0.0
@@ -17,6 +17,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/gertd/go-pluralize v0.2.1 // indirect
 	github.com/google/safeopen v0.0.0-20260327150837-43626d6f4685 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/iancoleman/strcase v0.3.0 // indirect
@@ -35,9 +36,9 @@ require (
 	github.com/sourcegraph/jsonrpc2 v0.2.0 // indirect
 	github.com/tliron/commonlog v0.2.18 // indirect
 	github.com/tliron/kutil v0.3.25 // indirect
-	golang.org/x/crypto v0.26.0 // indirect
+	golang.org/x/crypto v0.35.0 // indirect
 	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc // indirect
-	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/term v0.23.0 // indirect
-	golang.org/x/text v0.17.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/term v0.29.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 )
