@@ -1,6 +1,6 @@
 module github.com/acronis/go-raml/cmd/raml-lsp
 
-go 1.23
+go 1.23.0
 
 require (
 	github.com/acronis/go-raml/v3 v3.0.0
