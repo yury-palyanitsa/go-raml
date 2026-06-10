@@ -1,0 +1,146 @@
+{
+    "name": "raml-lsp-vscode",
+    "displayName": "RAML Language Server",
+    "description": "RAML 1.0 language support powered by the go-raml LSP server: diagnostics, hover, go-to-definition, find references, and document symbols.",
+    "version": "0.1.0",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/acronis/go-raml"
+    },
+    "publisher": "acronis",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Linters"
+    ],
+    "keywords": ["raml", "api", "lsp"],
+    "main": "./dist/extension.js",
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "raml",
+                "aliases": ["RAML", "raml"],
+                "extensions": [".raml"],
+                "configuration": "./language-configs/raml.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "raml",
+                "scopeName": "source.raml",
+                "path": "./syntaxes/raml.tmLanguage.json"
+            }
+        ],
+        "configuration": {
+            "title": "RAML Language Server",
+            "properties": {
+                "ramlLsp.serverPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Absolute path to the raml-lsp binary. Leave empty to use the binary bundled with the extension (bin/raml-lsp[.exe])."
+                },
+                "ramlLsp.trace.server": {
+                    "type": "string",
+                    "enum": ["off", "messages", "verbose"],
+                    "default": "off",
+                    "description": "Traces the communication between VS Code and the RAML language server."
+                },
+                "ramlLsp.autoReloadPreviewOnSave": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically refresh the API Console preview when a RAML file is saved."
+                },
+                "ramlLsp.allowRemote": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable resolution of HTTP/HTTPS remote fragments (\"!include https://...\"). When disabled (default) only local file:// URIs are loaded."
+                }
+            }
+        },
+        "commands": [
+            {
+                "command": "ramlLsp.restart",
+                "title": "Restart RAML Language Server",
+                "category": "RAML"
+            },
+            {
+                "command": "ramlLsp.preview",
+                "title": "Preview API Console",
+                "category": "RAML",
+                "icon": "$(open-preview)"
+            },
+            {
+                "command": "ramlLsp.serializeToFile",
+                "title": "Serialize to AMF Graph (JSON-LD)",
+                "category": "RAML",
+                "icon": "$(save)"
+            },
+            {
+                "command": "ramlLsp.convert",
+                "title": "Convert to...",
+                "category": "RAML",
+                "icon": "$(export)"
+            },
+            {
+                "command": "ramlLsp.selectRootApi",
+                "title": "Select Root API File",
+                "category": "RAML"
+            },
+            {
+                "command": "ramlLsp.setCurrentAsRootApi",
+                "title": "Set Current File as Root API",
+                "category": "RAML"
+            },
+            {
+                "command": "ramlLsp.clearRootApi",
+                "title": "Clear Root API File",
+                "category": "RAML"
+            }
+        ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "ramlLsp.preview",
+                    "when": "resourceExtname == .raml",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ramlLsp.serializeToFile",
+                    "when": "resourceExtname == .raml",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ramlLsp.convert",
+                    "when": "resourceExtname == .raml",
+                    "group": "navigation"
+                }
+            ]
+        }
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/vscode": "^1.80.0",
+        "ts-loader": "^9.5.0",
+        "typescript": "^5.4.0",
+        "webpack": "^5.91.0",
+        "webpack-cli": "^5.1.4"
+    },
+    "scripts": {
+        "compile": "tsc --noEmit",
+        "webpack": "webpack --mode development",
+        "webpack:prod": "webpack --mode production",
+        "vscode:prepublish": "webpack --mode production",
+        "package": "node scripts/package-platforms.js",
+        "package:current": "node scripts/package-platforms.js --current",
+        "package:target": "node scripts/package-platforms.js"
+    }
+}

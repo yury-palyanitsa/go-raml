@@ -1,14 +1,16 @@
-parser grammar rdtParser;
+parser grammar RdtParser;
 
 options {
-	tokenVocab = rdtLexer;
+	tokenVocab = RdtLexer;
 }
 
 entrypoint: expression EOF;
 
-expression: type | union;
+expression: union;
 
-type: primitive | group | reference | array | optional;
+union: type (WS* PIPE WS* type)*;
+
+type: (primitive | group | reference) ARRAY_NOTATION* OPTIONAL_NOTATION?;
 
 primitive:
 	STRING_TYPE
@@ -25,12 +27,6 @@ primitive:
 	| ARRAY_TYPE
 	| OBJECT_TYPE
 	| UNION_TYPE;
-
-optional: (primitive | group | reference) OPTIONAL_NOTATION;
-
-array: (primitive | group | reference) ARRAY_NOTATION;
-
-union: type WS* (PIPE WS* type WS*)+;
 
 group: LPAREN WS* expression WS* RPAREN;
 

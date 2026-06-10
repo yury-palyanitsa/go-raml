@@ -4,6 +4,6 @@ IF ERRORLEVEL 1 (
     ECHO "ANTLR4 is missing. If you have Python installed, you can install it by running 'pip install antlr4-tools'."
     PAUSE
 ) ELSE (
-    antlr4 -Dlanguage=Go .\rdtLexer.g4
-    antlr4 -Dlanguage=Go -visitor -no-listener .\rdtParser.g4
+    antlr4 -Dlanguage=Go .\RdtLexer.g4
+    antlr4 -Dlanguage=Go -visitor -no-listener .\RdtParser.g4
 )

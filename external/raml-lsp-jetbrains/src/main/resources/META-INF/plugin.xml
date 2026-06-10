@@ -1,0 +1,64 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>com.acronis.raml</id>
+    <name>RAML Language Server</name>
+    <vendor url="https://github.com/acronis/go-raml">Acronis</vendor>
+
+    <description><![CDATA[
+        <p><b>RAML Language Server</b> adds RAML 1.0 language support to JetBrains IDEs
+        powered by the <a href="https://github.com/acronis/go-raml">go-raml</a> LSP server.</p>
+        <p>Features provided via the Language Server Protocol:</p>
+        <ul>
+            <li>Diagnostics (parse and validation errors)</li>
+            <li>Hover documentation</li>
+            <li>Go to definition</li>
+            <li>Find references</li>
+            <li>Document symbols</li>
+        </ul>
+        <p>The plugin bundles a platform-specific <code>raml-lsp</code> binary.
+        You can override the binary location in
+        <b>Settings&nbsp;▸&nbsp;Tools&nbsp;▸&nbsp;RAML Language Server</b>.</p>
+    ]]></description>
+
+    <!-- LSP API became freely available in IntelliJ IDEA 2025.2.1 (build 252). -->
+    <idea-version since-build="252"/>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- LSP module: available in all JetBrains IDEs from 2025.2.1 onward. -->
+    <depends>com.intellij.modules.lsp</depends>
+    <!-- TextMate support for .raml syntax highlighting. -->
+    <depends>org.jetbrains.plugins.textmate</depends>
+
+    <resource-bundle>messages.RamlBundle</resource-bundle>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- TextMate bundle for .raml syntax highlighting. -->
+        <textmate.bundleProvider
+                implementation="com.acronis.raml.textmate.RamlTextMateBundleProvider"/>
+
+        <!-- Register the LSP server support provider. -->
+        <platform.lsp.serverSupportProvider
+                implementation="com.acronis.raml.lsp.RamlLspServerSupportProvider"/>
+
+        <!-- Persistent application-level settings. -->
+        <applicationService
+                serviceImplementation="com.acronis.raml.settings.RamlSettings"/>
+
+        <!-- Settings page under Tools. -->
+        <applicationConfigurable
+                parentId="tools"
+                instance="com.acronis.raml.settings.RamlSettingsConfigurable"
+                id="com.acronis.raml.settings"
+                displayName="RAML Language Server"/>
+    </extensions>
+
+    <actions>
+        <action id="ramlLsp.restart"
+                class="com.acronis.raml.actions.RestartRamlLspAction"
+                text="Restart RAML Language Server"
+                description="Stop and restart the RAML LSP server for the current project."
+                icon="AllIcons.Actions.Refresh">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

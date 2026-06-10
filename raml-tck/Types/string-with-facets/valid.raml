@@ -1,0 +1,24 @@
+#%RAML 1.0
+title: String With Facets API
+
+types:
+  StringShape:
+    displayName: String type
+    type: string
+
+    facets:
+      custom: string
+
+    minLength: 0
+    maxLength: 15
+    pattern: ^Test Example$
+    enum:
+    - Test Example
+
+    examples:
+      Inline example: Test Example
+
+  InheritedStringType:
+    displayName: Inherited string type
+    type: StringShape
+    custom: ...

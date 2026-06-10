@@ -1,0 +1,159 @@
+{
+  "@context": {
+    "@base": "amf://id",
+    "apiContract": "http://a.ml/vocabularies/apiContract#",
+    "core": "http://a.ml/vocabularies/core#",
+    "data": "http://a.ml/vocabularies/data#",
+    "doc": "http://a.ml/vocabularies/document#",
+    "raml-shapes": "http://a.ml/vocabularies/shapes#",
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "security": "http://a.ml/vocabularies/security#",
+    "sh": "http://www.w3.org/ns/shacl#"
+  },
+  "@graph": [
+    {
+      "@id": "#/web-api",
+      "@type": [
+        "apiContract:WebAPI",
+        "apiContract:API",
+        "doc:RootDomainElement",
+        "doc:DomainElement"
+      ],
+      "core:name": "test"
+    },
+    {
+      "@id": "#/declarations/types/AnyObjType/property/a/a",
+      "@type": [
+        "raml-shapes:RecursiveShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "doc:recursive": true,
+      "raml-shapes:fixPoint": {
+        "@id": "#/declarations/types/a"
+      }
+    },
+    {
+      "@id": "#/declarations/types/AnyObjType/property/a",
+      "@type": [
+        "sh:PropertyShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "raml-shapes:range": {
+        "@id": "#/declarations/types/AnyObjType/property/a/a"
+      },
+      "sh:minCount": 1,
+      "sh:name": "a",
+      "sh:path": [
+        {
+          "@id": "data:a"
+        }
+      ]
+    },
+    {
+      "@id": "#/declarations/types/AnyObjType",
+      "@type": [
+        "sh:NodeShape",
+        "raml-shapes:AnyShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "sh:closed": false,
+      "sh:name": "AnyObjType",
+      "sh:property": [
+        {
+          "@id": "#/declarations/types/AnyObjType/property/a"
+        }
+      ]
+    },
+    {
+      "@id": "#/declarations/types/IntegerType/property/a/scalar/a",
+      "@type": [
+        "raml-shapes:ScalarShape",
+        "raml-shapes:AnyShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "sh:datatype": [
+        {
+          "@id": "http://www.w3.org/2001/XMLSchema#integer"
+        }
+      ],
+      "sh:name": "a"
+    },
+    {
+      "@id": "#/declarations/types/IntegerType/property/a",
+      "@type": [
+        "sh:PropertyShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "raml-shapes:range": {
+        "@id": "#/declarations/types/IntegerType/property/a/scalar/a"
+      },
+      "sh:minCount": 1,
+      "sh:name": "a",
+      "sh:path": [
+        {
+          "@id": "data:a"
+        }
+      ]
+    },
+    {
+      "@id": "#/declarations/types/IntegerType",
+      "@type": [
+        "sh:NodeShape",
+        "raml-shapes:AnyShape",
+        "sh:Shape",
+        "raml-shapes:Shape",
+        "doc:DomainElement"
+      ],
+      "sh:closed": false,
+      "sh:name": "IntegerType",
+      "sh:property": [
+        {
+          "@id": "#/declarations/types/IntegerType/property/a"
+        }
+      ]
+    },
+    {
+      "@id": "#/processingData",
+      "@type": [
+        "doc:APIContractProcessingData"
+      ],
+      "doc:sourceSpec": "RAML 1.0",
+      "doc:transformed": true
+    },
+    {
+      "@id": "",
+      "@type": [
+        "doc:Document",
+        "doc:Fragment",
+        "doc:Module",
+        "doc:Unit"
+      ],
+      "doc:declares": [
+        {
+          "@id": "#/declarations/types/AnyObjType"
+        },
+        {
+          "@id": "#/declarations/types/IntegerType"
+        }
+      ],
+      "doc:encodes": {
+        "@id": "#/web-api"
+      },
+      "doc:processingData": {
+        "@id": "#/processingData"
+      },
+      "doc:root": true
+    }
+  ]
+}

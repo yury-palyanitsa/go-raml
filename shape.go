@@ -1,14 +1,13 @@
 package raml
 
 import (
-	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"path/filepath"
+	"strings"
 	"sync/atomic"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
-	"github.com/xeipuuv/gojsonschema"
 	"gopkg.in/yaml.v3"
 
 	"github.com/acronis/go-stacktrace"
@@ -41,100 +40,111 @@ type ShapeSetter interface {
 	SetShape(Shape)
 }
 
+// TypeExprRef records a single named-type reference within a type expression,
+// alongside the source position (1-based line and column) where that name
+// appears in the document. Populated by the RDT visitor; used by LSP tooling
+// to provide go-to-definition and hover at the exact reference site.
+//
+// Exactly one of Resolved, LibraryLink, or BuiltinType is set:
+//   - Resolved is set for plain type-name references (e.g. "TestType").
+//   - LibraryLink + LibraryAlias are set for the library-prefix part of a
+//     qualified reference (e.g. "lib" in "lib.TestType"), allowing navigation
+//     to the library file itself.
+//   - BuiltinType is set for RAML built-in primitive type names (e.g. "string",
+//     "integer"), enabling hover documentation without a definition target.
+type TypeExprRef struct {
+	Line   int
+	Column int
+
+	// Type-name reference (e.g. "TestType" or the "TestType" part of "lib.TestType").
+	Resolved *BaseShape
+
+	// Library-prefix reference (e.g. "lib" in "lib.TestType").
+	LibraryLink  *LibraryLink
+	LibraryAlias string // the prefix as written, e.g. "lib"
+
+	// BuiltinType is the name of a RAML built-in type (e.g. "string", "integer").
+	// Set by VisitPrimitive; Resolved and LibraryLink are nil when this is non-empty.
+	BuiltinType string
+}
+
 type BaseShape struct {
 	Shape
 	ID          int64
 	Name        string
-	DisplayName *string
-	Description *string
+	DisplayName *ScalarFacet[string]
+	Description *ScalarFacet[string]
 	// TODO: Move Type to underlying Shape
-	Type      string
-	TypeLabel string // Used to store the label either the link or type value
-	Example   *Example
-	Examples  *Examples
-	Inherits  []*BaseShape
-	Alias     *BaseShape
-	Default   *Node
-	Required  *bool
+	Type     string
+	TypeExpr *Node[string] // raw type expression as written; replaces typeExprLine/typeExprCol
+	Example  *Example
+	Examples *Examples
+	Inherits []*BaseShape
+	Alias    *BaseShape
+	Default  *DataNode
+	Required *ScalarFacet[bool]
+	XML      *XMLSerialization
+	Enum     Nodes
 
 	// To support !include of DataType fragment
 	Link *DataTypeFragment
 
 	// CustomShapeFacets is a map of custom facets with values
-	CustomShapeFacets *orderedmap.OrderedMap[string, *Node]
+	CustomShapeFacets *orderedmap.OrderedMap[string, *DataNode]
 	// CustomShapeFacetDefinitions is an object properties share the same syntax with custom shape facets.
 	CustomShapeFacetDefinitions *orderedmap.OrderedMap[string, Property]
 	// CustomDomainProperties is a map of custom annotations
 	CustomDomainProperties *orderedmap.OrderedMap[string, *DomainExtension]
 
+	// TypeExprRefs records each named type referenced in the expression alongside
+	// the exact source position where that name was written.
+	// Populated by the RDT visitor (VisitReference).
+	TypeExprRefs []TypeExprRef
+
 	// Controlled by UnwrapShape
 	unwrapped bool
 	// NOTE: Not thread safe and should be used only in one method simultaneously.
 	ShapeVisited bool
+	// IsAnnotationType marks shapes that were declared in an annotationTypes: block.
+	// Set during parsing so the RDT resolver can route them through
+	// GetReferencedAnnotationType instead of GetReferencedType.
+	IsAnnotationType bool
+	// anchorFrag is the nearest Library or APIFragment used for unqualified type
+	// resolution.  Set from the ParseCtx stack in MakeBaseShape.
+	anchorFrag ReferenceResolver
 
 	raml *RAML
 
 	Location string
-	stacktrace.Position
-}
-
-func (s *BaseShape) callRAMLHooks(key HookKey, params ...any) error {
-	if s.raml == nil {
-		return nil
-	}
-	params = append([]any{s}, params...)
-	return s.raml.callHooks(key, params...)
-}
-
-func (s *BaseShape) AppendRAMLHook(key HookKey, hook HookFunc) {
-	if s.raml == nil {
-		s.raml = New(context.Background())
-	}
-	s.raml.AppendHook(key, hook)
-}
-
-func (s *BaseShape) RemoveRAMLHook(key HookKey, hook HookFunc) {
-	if s.raml == nil {
-		return
-	}
-	s.raml.RemoveHook(key, hook)
-}
-
-func (s *BaseShape) PrepenRAMLHook(key HookKey, hook HookFunc) {
-	if s.raml == nil {
-		s.raml = New(context.Background())
-	}
-	s.raml.PrependHook(key, hook)
-}
-
-func (s *BaseShape) ClearRAMLHooks(key HookKey) {
-	if s.raml == nil {
-		return
-	}
-	s.raml.ClearHooks(key)
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
 }
 
 func (s *BaseShape) SetShape(shape Shape) {
 	s.Shape = shape
 }
 
-func (s *BaseShape) Validate(v interface{}) error {
-	return s.Shape.validate(v, "$")
+// validateAt runs enum checking then delegates to the shape's internal
+// validate. All internal callers that need path tracking use this method.
+func (s *BaseShape) validateAt(v any, path string) error {
+	if s.Enum != nil {
+		return s.validateEnum(v)
+	}
+	return s.Shape.validate(v, path)
 }
 
-const HookBeforeBaseShapeInherit = "BaseShape.Inherit"
+func (s *BaseShape) Validate(v any) error {
+	return s.validateAt(v, "$")
+}
 
 func (s *BaseShape) Inherit(sourceBase *BaseShape) (*BaseShape, error) {
-	if err := s.callRAMLHooks(HookBeforeBaseShapeInherit, sourceBase); err != nil {
-		return nil, err
-	}
-
 	// Avoid recursion caused by inheritance chain
 	if sourceBase.ShapeVisited {
 		// NOTE: We do not mark any recursions here. External code must handle this case.
 		return sourceBase, nil
 	}
 	sourceBase.ShapeVisited = true
+	defer func() { sourceBase.ShapeVisited = false }()
 
 	source := sourceBase.Shape
 	target := s.Shape
@@ -153,6 +163,16 @@ func (s *BaseShape) Inherit(sourceBase *BaseShape) (*BaseShape, error) {
 				s.CustomShapeFacets.Set(k, sourceNode)
 			}
 		}
+	}
+
+	// Inherit enum
+	if s.Enum == nil {
+		s.Enum = sourceBase.Enum
+	} else if sourceBase.Enum != nil && !isCompatibleEnum(sourceBase.Enum, s.Enum) {
+		return nil, StacktraceNew("enum constraint violation", s.Location,
+			stacktrace.WithPosition(&s.KeyPos),
+			stacktrace.WithInfo("source", sourceBase.Enum.String()),
+			stacktrace.WithInfo("target", s.Enum.String()))
 	}
 
 	// If source type is any, return target as is
@@ -174,20 +194,14 @@ func (s *BaseShape) Inherit(sourceBase *BaseShape) (*BaseShape, error) {
 	_, err := target.inherit(source)
 	if err != nil {
 		return nil, StacktraceNewWrapped("merge shapes", err, target.Base().Location,
-			stacktrace.WithPosition(&target.Base().Position))
+			stacktrace.WithPosition(&target.Base().KeyPos))
 	}
-	sourceBase.ShapeVisited = false
 	return s, nil
 }
 
-const HookBeforeBaseShapeInheritUnionSource = "BaseShape.inheritUnionSource"
-
 func (s *BaseShape) inheritUnionSource(sourceUnion *UnionShape) (*BaseShape, error) {
-	if err := s.callRAMLHooks(HookBeforeBaseShapeInheritUnionSource, sourceUnion); err != nil {
-		return nil, err
-	}
 	var filtered []*BaseShape
-	var st *stacktrace.StackTrace
+	var acc stacktrace.Accumulator
 	for _, source := range sourceUnion.AnyOf {
 		// If at least one union member has any type, the whole union is considered as any type.
 		if _, ok := source.Shape.(*AnyShape); ok {
@@ -196,16 +210,11 @@ func (s *BaseShape) inheritUnionSource(sourceUnion *UnionShape) (*BaseShape, err
 		if source.Type == s.Type {
 			// Deep copy with ID change is required since we create new union members from source members
 			tc := s.CloneDetached()
-			tc.ID = s.raml.generateShapeID()
+			tc.ID = s.raml.generateSequenceID()
 			is, err := tc.Inherit(source)
 			if err != nil {
-				se := StacktraceNewWrapped("merge shapes", err, s.Location,
-					stacktrace.WithPosition(&s.Position))
-				if st == nil {
-					st = se
-				} else {
-					st = st.Append(se)
-				}
+				acc.Add(StacktraceNewWrapped("merge shapes", err, s.Location,
+					stacktrace.WithPosition(&s.KeyPos)))
 				// Skip shapes that didn't pass inheritance check
 				continue
 			}
@@ -214,9 +223,9 @@ func (s *BaseShape) inheritUnionSource(sourceUnion *UnionShape) (*BaseShape, err
 	}
 	if len(filtered) == 0 {
 		se := StacktraceNew("failed to find compatible union member", s.Location,
-			stacktrace.WithPosition(&s.Position))
-		if st != nil {
-			se = se.Append(st)
+			stacktrace.WithPosition(&s.KeyPos))
+		if details := acc.Result(); details != nil {
+			se = se.Append(details)
 		}
 		return nil, se
 	}
@@ -235,50 +244,68 @@ func (s *BaseShape) inheritUnionSource(sourceUnion *UnionShape) (*BaseShape, err
 	return s, nil
 }
 
-const HookBeforeBaseShapeInheritUnionTarget = "BaseShape.inheritUnionTarget"
-
 func (s *BaseShape) inheritUnionTarget(targetUnion *UnionShape) (*BaseShape, error) {
-	if err := s.callRAMLHooks(HookBeforeBaseShapeInheritUnionTarget, targetUnion); err != nil {
-		return nil, err
-	}
-	var st *stacktrace.StackTrace
+	var acc stacktrace.Accumulator
 	for _, item := range targetUnion.AnyOf {
 		// Merge will raise an error in case any of union members has incompatible type
 		_, err := item.Inherit(s)
 		if err != nil {
-			se := StacktraceNewWrapped("merge shapes", err, targetUnion.Base().Location,
-				stacktrace.WithPosition(&targetUnion.Base().Position))
-			if st == nil {
-				st = se
-			} else {
-				st = st.Append(se)
-			}
+			acc.Add(StacktraceNewWrapped("merge shapes", err, targetUnion.Base().Location,
+				stacktrace.WithPosition(&targetUnion.Base().KeyPos)))
 			continue
 		}
 	}
-	if st != nil {
-		return nil, st
+	if result := acc.Result(); result != nil {
+		return nil, result
 	}
 	return targetUnion.Base(), nil
+}
+
+// checkInheritType performs the type assertion check common to all inherit() methods.
+func checkInheritType[T Shape](target Shape, source Shape) (T, error) {
+	ss, ok := source.(T)
+	if !ok {
+		var zero T
+		return zero, StacktraceNew("cannot inherit from different type", target.Base().Location,
+			stacktrace.WithPosition(&target.Base().KeyPos),
+			stacktrace.WithInfo("source", source.Base().Type),
+			stacktrace.WithInfo("target", target.Base().Type))
+	}
+	return ss, nil
+}
+
+// checkAliasType performs the type assertion check common to all alias() methods.
+func checkAliasType[T Shape](target Shape, source Shape) (T, error) {
+	ss, ok := source.(T)
+	if !ok {
+		var zero T
+		return zero, StacktraceNew("cannot make alias from different type", target.Base().Location,
+			stacktrace.WithPosition(&target.Base().KeyPos),
+			stacktrace.WithInfo("source", source.Base().Type),
+			stacktrace.WithInfo("target", target.Base().Type))
+	}
+	return ss, nil
 }
 
 func (s *BaseShape) AliasTo(source *BaseShape) (*BaseShape, error) {
 	_, err := s.Shape.alias(source.Shape)
 	if err != nil {
 		return nil, StacktraceNewWrapped("alias shape", err, s.Location,
-			stacktrace.WithPosition(&s.Position))
+			stacktrace.WithPosition(&s.KeyPos))
 	}
 	s.DisplayName = source.DisplayName
 	s.Description = source.Description
 	s.Example = source.Example
 	s.Examples = source.Examples
 	s.Inherits = source.Inherits
-	s.Alias = source.Alias
+	// Alias must point to the original shape
 	s.Default = source.Default
 	s.Required = source.Required
+	s.Enum = source.Enum
 	s.CustomShapeFacets = source.CustomShapeFacets
 	s.CustomShapeFacetDefinitions = source.CustomShapeFacetDefinitions
 	s.CustomDomainProperties = source.CustomDomainProperties
+	s.XML = source.XML
 	return s, nil
 }
 
@@ -292,7 +319,7 @@ func (s *BaseShape) CloneShallow() *BaseShape {
 		c.CustomDomainProperties.Set(pair.Key, pair.Value)
 	}
 
-	c.CustomShapeFacets = orderedmap.New[string, *Node](s.CustomShapeFacets.Len())
+	c.CustomShapeFacets = orderedmap.New[string, *DataNode](s.CustomShapeFacets.Len())
 	for pair := s.CustomShapeFacets.Oldest(); pair != nil; pair = pair.Next() {
 		c.CustomShapeFacets.Set(pair.Key, pair.Value)
 	}
@@ -337,7 +364,7 @@ func (s *BaseShape) clone(clonedMap map[int64]*BaseShape) *BaseShape {
 	clonedMap[s.ID] = &c
 
 	// TODO: Node is not deep copied yet, but it's not mutated anyway
-	c.CustomShapeFacets = orderedmap.New[string, *Node](s.CustomShapeFacets.Len())
+	c.CustomShapeFacets = orderedmap.New[string, *DataNode](s.CustomShapeFacets.Len())
 	for pair := s.CustomShapeFacets.Oldest(); pair != nil; pair = pair.Next() {
 		c.CustomShapeFacets.Set(pair.Key, pair.Value)
 	}
@@ -376,7 +403,16 @@ func (s *BaseShape) clone(clonedMap map[int64]*BaseShape) *BaseShape {
 
 // Check returns an error if type shape is invalid.
 func (s *BaseShape) Check() error {
-	return s.Shape.check()
+	if err := s.Shape.check(); err != nil {
+		return err
+	}
+	for _, e := range s.Enum {
+		if err := s.validate(e.Value.Raw, "$"); err != nil {
+			return StacktraceNewWrapped("enum value is invalid", err, s.Location,
+				stacktrace.WithPosition(&e.ValuePos))
+		}
+	}
+	return nil
 }
 
 // IsUnwrapped returns true if the shape is unwrapped.
@@ -422,7 +458,7 @@ type ShapeBaser interface {
 
 // ShapeValidator is the interface that represents a validator of a RAML shape.
 type ShapeValidator interface {
-	validate(v interface{}, ctxPath string) error
+	validate(v any, ctxPath string) error
 }
 
 // ShapeInheritor is the interface that represents an inheritor of a RAML shape.
@@ -467,7 +503,7 @@ type Shape interface {
 }
 
 // identifyShapeType identifies the type of the shape by facets.
-func identifyShapeType(shapeFacets []*yaml.Node) (string, error) {
+func identifyShapeType(shapeFacets []*yaml.Node, defaultType string) (string, error) {
 	var t = ""
 	var stringOnly bool
 	for i := 0; i != len(shapeFacets); i += 2 {
@@ -514,14 +550,16 @@ func identifyShapeType(shapeFacets []*yaml.Node) (string, error) {
 			t = ft
 		}
 	}
+	// Return default type if no type can be determined
 	if t == "" {
-		t = TypeString
+		t = defaultType
 	}
 	return t, nil
 }
 
 func (r *RAML) MakeRecursiveShape(headBase *BaseShape) *BaseShape {
-	recursiveBase := r.MakeBaseShape(headBase.Name, headBase.Location, headBase.Position)
+	recursiveBase := r.MakeBaseShape(headBase.Name, headBase.Location, headBase.KeyPos, headBase.ValuePos)
+	recursiveBase.anchorFrag = headBase.anchorFrag
 	recursiveBase.Name = headBase.Name
 	recursiveBase.Type = TypeRecursive
 	recursiveBase.Description = headBase.Description
@@ -537,47 +575,46 @@ func (r *RAML) MakeRecursiveShape(headBase *BaseShape) *BaseShape {
 func (r *RAML) MakeJSONShape(base *BaseShape, rawSchema string) (*JSONShape, error) {
 	base.Type = "json"
 
-	// TODO: Probably this can be replaced with gojsonschema but it does not expose internal schema structure.
-	var schema *JSONSchema
-	err := json.Unmarshal([]byte(rawSchema), &schema)
+	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(rawSchema))
 	if err != nil {
-		return nil, StacktraceNewWrapped("unmarshal json", err, base.Location,
-			stacktrace.WithPosition(&base.Position))
+		return nil, StacktraceNewWrapped("unmarshal json schema doc", err, base.Location,
+			stacktrace.WithPosition(&base.KeyPos))
 	}
 
-	// TODO: This will only work with local files, but currently we work only with local files anyway
-	p := "file://" + filepath.ToSlash(base.Location)
-	// Load schema using string loader
-	l := gojsonschema.NewStringLoader(rawSchema)
-	sl := gojsonschema.NewSchemaLoader()
-	// Add it to schema loader with URI pointing to RAML file.
-	// This will cache the schema and resolve all references against this URI.
-	err = sl.AddSchema(p, l)
-	if err != nil {
-		return nil, StacktraceNewWrapped("add schema", err, base.Location,
-			stacktrace.WithPosition(&base.Position))
-	}
-	// Replace StringLoader with ReferenceLoader to support local/remote references resolution.
-	// Since the reference is cached, gojsonschema will not attempt to load it from the storage.
-	// TODO: Introduce custom reference loader to have possibility to disallow remote schemas.
-	l = gojsonschema.NewReferenceLoader(p)
-	validator, err := sl.Compile(l)
-	if err != nil {
-		return nil, StacktraceNewWrapped("new schema", err, base.Location,
-			stacktrace.WithPosition(&base.Position))
+	if err = compiledMetaSchemaDraft07.Validate(doc); err != nil {
+		return nil, StacktraceNewWrapped("validate json schema", err, base.Location,
+			stacktrace.WithPosition(&base.KeyPos))
 	}
 
-	return &JSONShape{BaseShape: base, Raw: rawSchema, Schema: schema, Validator: validator}, nil
+	// Use the file URI as the schema identity so that relative $ref values are
+	// resolved against the RAML file that contains the inline JSON Schema.
+	// pathToFileURI is idempotent: if base.Location is already a file:// URI
+	// (from ParseFromPath / ParseFromString) it is returned unchanged; if it
+	// is a raw OS path (from direct MakeJSONShape calls in tests/constructors)
+	// it is converted to the canonical file:// form.
+	p := PathToFileURI(base.Location)
+
+	if err = r.jsonSchemaCompiler.AddResource(p, doc); err != nil {
+		// ResourceExistsError means this URL was already registered by an earlier
+		// schema in the same RAML parse session — the cached entry is identical,
+		// so it is safe to continue.
+		var exists *jsonschema.ResourceExistsError
+		if !errors.As(err, &exists) {
+			return nil, StacktraceNewWrapped("add schema resource", err, base.Location,
+				stacktrace.WithPosition(&base.KeyPos))
+		}
+	}
+	validator, err := r.jsonSchemaCompiler.Compile(p)
+	if err != nil {
+		return nil, StacktraceNewWrapped("compile schema", err, base.Location,
+			stacktrace.WithPosition(&base.KeyPos))
+	}
+
+	return &JSONShape{BaseShape: base, Raw: rawSchema, Validator: validator}, nil
 }
-
-const HookBeforeRAMLMakeConcreteShapeYAML = "before:RAML.makeConcreteShapeYAML"
 
 // MakeConcreteShapeYAML creates a new concrete shape and assigns it to the base shape.
 func (r *RAML) MakeConcreteShapeYAML(base *BaseShape, shapeType string, shapeFacets []*yaml.Node) (Shape, error) {
-	if err := r.callHooks(HookBeforeRAMLMakeConcreteShapeYAML, base, shapeType, shapeFacets); err != nil {
-		return nil, err
-	}
-
 	base.Type = shapeType
 
 	// NOTE: Shape resolution is performed in a separate stage.
@@ -621,43 +658,51 @@ func (r *RAML) MakeConcreteShapeYAML(base *BaseShape, shapeType string, shapeFac
 
 	if err := shape.unmarshalYAMLNodes(shapeFacets); err != nil {
 		return nil, StacktraceNewWrapped("unmarshal yaml nodes", err, base.Location,
-			stacktrace.WithPosition(&base.Position), stacktrace.WithInfo("shape type", shapeType))
+			stacktrace.WithPosition(&base.KeyPos), stacktrace.WithInfo("shape type", shapeType))
 	}
 
 	return shape, nil
 }
 
-// MakeBaseShape creates a new base shape which is a base for all shapes.
-func (r *RAML) MakeBaseShape(name string, location string, position stacktrace.Position) *BaseShape {
+// MakeBaseShape creates a new base shape which is the base for all shapes.
+// The anchor fragment (used for unqualified type resolution) is taken from the
+// current ParseCtx stack entry.
+func (r *RAML) MakeBaseShape(name string, location string, KeyPos stacktrace.Position, ValuePos stacktrace.Position) *BaseShape {
 	// If position is not set, use default position.
-	if position.Line == 0 && position.Column == 0 {
-		position.Line = 1
+	if KeyPos.Line == 0 && KeyPos.Column == 0 {
+		KeyPos.Line = 1
+	}
+	if ValuePos.Line == 0 && ValuePos.Column == 0 {
+		ValuePos.Line = 1
 	}
 	b := &BaseShape{
-		ID:       r.generateShapeID(),
-		Name:     name,
-		Location: location,
-		Position: position,
+		ID:         r.generateSequenceID(),
+		Name:       name,
+		Location:   location,
+		anchorFrag: r.currentParseCtx().AnchorFrag,
+		KeyPos:     KeyPos,
+		ValuePos:   ValuePos,
 
 		raml:                        r,
 		CustomDomainProperties:      orderedmap.New[string, *DomainExtension](0),
-		CustomShapeFacets:           orderedmap.New[string, *Node](0),
+		CustomShapeFacets:           orderedmap.New[string, *DataNode](0),
 		CustomShapeFacetDefinitions: orderedmap.New[string, Property](0),
 	}
 	r.PutShape(b)
 	return b
 }
 
-func (r *RAML) generateShapeID() int64 {
+func (r *RAML) generateSequenceID() int64 {
 	return atomic.AddInt64(&r.idCounter, 1)
 }
 
 func (r *RAML) makeShapeType(
+	typeKeyNode *yaml.Node,
 	shapeTypeNode *yaml.Node,
 	shapeFacets []*yaml.Node,
-	name string,
 	location string,
 	base *BaseShape,
+	defaultType string,
 ) (string, Shape, error) {
 	var shapeType string
 	switch shapeTypeNode.Kind {
@@ -674,11 +719,18 @@ func (r *RAML) makeShapeType(
 		return "", nil, StacktraceNew("alias node is not allowed", location,
 			WithNodePosition(shapeTypeNode))
 	case yaml.ScalarNode:
+		// Record where this type expression was written for LSP reference tracking.
+		includedFrom := r.noteIncludeRef(shapeTypeNode, location)
+		if typeKeyNode != nil {
+			base.TypeExpr = MakeNode(shapeTypeNode.Value, typeKeyNode, shapeTypeNode, location, includedFrom)
+		} else {
+			base.TypeExpr = MakeSeqNode(shapeTypeNode.Value, shapeTypeNode, location, includedFrom)
+		}
 		switch shapeTypeNode.Tag {
 		case TagStr:
 			shapeType = shapeTypeNode.Value
 			if shapeType == "" {
-				shapeTypeI, err := identifyShapeType(shapeFacets)
+				shapeTypeI, err := identifyShapeType(shapeFacets, defaultType)
 				if err != nil {
 					return "", nil, StacktraceNewWrapped("identify shape type", err, location,
 						WithNodePosition(shapeTypeNode))
@@ -690,16 +742,15 @@ func (r *RAML) makeShapeType(
 					return "", nil, StacktraceNewWrapped("make json shape", errMake, location,
 						WithNodePosition(shapeTypeNode))
 				}
+				shapeType = TypeJSON
 				return shapeType, s, nil
 			}
 		case TagInclude:
-			baseDir := filepath.Dir(location)
-			dt, errParse := r.parseDataType(filepath.Join(baseDir, shapeTypeNode.Value))
+			dt, errParse := r.parseDataType(includedFrom)
 			if errParse != nil {
 				return "", nil, StacktraceNewWrapped("parse data", errParse, location,
 					WithNodePosition(shapeTypeNode))
 			}
-			base.TypeLabel = shapeTypeNode.Value
 			base.Link = dt
 		case TagNull:
 			shapeType = TypeString
@@ -717,7 +768,7 @@ func (r *RAML) makeShapeType(
 				return "", nil, StacktraceNew("!include is not allowed in multiple inheritance",
 					location, WithNodePosition(node))
 			}
-			s, errMake := r.makeNewShapeYAML(node, name, location)
+			s, errMake := r.makeNewShapeYAML(node, node, location)
 			if errMake != nil {
 				return "", nil, StacktraceNewWrapped("make shape", errMake, location,
 					WithNodePosition(node))
@@ -734,44 +785,71 @@ func (r *RAML) MakeNewShape(
 	name string,
 	shapeType string,
 	location string,
-	position stacktrace.Position,
+	KeyPos stacktrace.Position,
+	ValuePos stacktrace.Position,
 ) (*BaseShape, Shape, error) {
-	base := r.MakeBaseShape(name, location, position)
+	base := r.MakeBaseShape(name, location, KeyPos, ValuePos)
 	s, err := r.MakeConcreteShapeYAML(base, shapeType, nil)
 	if err != nil {
 		return nil, nil, StacktraceNewWrapped("make concrete shape", err, location,
-			stacktrace.WithPosition(&base.Position))
+			stacktrace.WithPosition(&base.KeyPos))
 	}
 	return base, s, nil
 }
 
-const HookBeforeRAMLMakeNewShapeYAML = "before:RAML.makeNewShapeYAML"
-
 // makeNewShapeYAML creates a new shape from the given YAML node.
-func (r *RAML) makeNewShapeYAML(v *yaml.Node, name string, location string) (*BaseShape, error) {
-	if err := r.callHooks(HookBeforeRAMLMakeNewShapeYAML, v); err != nil {
-		return nil, err
+// Default type is string when no type can be inferred.
+// Anchor context is read from r.currentParseCtx().
+func (r *RAML) makeNewShapeYAML(k, v *yaml.Node, location string) (*BaseShape, error) {
+	return r.makeNewShapeYAMLWithDefault(k, v, location, TypeString)
+}
+
+// makeNewBodyShapeYAML creates a new shape for body context from the given YAML node.
+// Default type is any when no type can be inferred (per RAML spec).
+func (r *RAML) makeNewBodyShapeYAML(k, v *yaml.Node, location string) (*BaseShape, error) {
+	return r.makeNewShapeYAMLWithDefault(k, v, location, TypeAny)
+}
+
+// makeNewShapeYAMLWithDefault creates a new shape from the given YAML node with a specified default type.
+func (r *RAML) makeNewShapeYAMLWithDefault(k, v *yaml.Node, location string, defaultType string) (*BaseShape, error) {
+	// When materializing a two-stage build body, a type-bearing node produced by
+	// parameter substitution or by a grafted trait/RT body carries an overlay
+	// scope. Push it so unqualified type references resolve in the right
+	// namespace. The shape's Location is also derived from the node so that
+	// stage-2 errors and the shape's own diagnostic position attribute to the
+	// file the node was authored in, not the (often different) file of the
+	// caller's threaded default — see RAML.locationOf for the rule.
+	if sc, ok := r.provenanceScopeFor(v); ok {
+		r.pushParseCtx(sc)
+		defer r.popParseCtx()
 	}
+	location = r.locationOf(v, location)
+	name := k.Value
+	base := r.MakeBaseShape(
+		name,
+		location,
+		NewNodePosition(k),
+		NewNodePosition(v),
+	)
+	r.storeEntityNode(base.ID, k, v)
 
-	base := r.MakeBaseShape(name, location, stacktrace.Position{Line: v.Line, Column: v.Column})
-
-	shapeTypeNode, shapeFacets, err := base.decode(v)
+	typeKeyNode, shapeTypeNode, shapeFacets, err := base.decode(v)
 	if err != nil {
 		return nil, StacktraceNewWrapped("decode", err, location, WithNodePosition(v))
 	}
 
 	var shapeType string
 	if shapeTypeNode == nil {
-		shapeType, err = identifyShapeType(shapeFacets)
+		shapeType, err = identifyShapeType(shapeFacets, defaultType)
 		if err != nil {
 			return nil, StacktraceNewWrapped("identify shape type", err, location,
 				WithNodePosition(v))
 		}
 	} else {
 		var shape Shape
-		shapeType, shape, err = r.makeShapeType(shapeTypeNode, shapeFacets, name, location, base)
+		shapeType, shape, err = r.makeShapeType(typeKeyNode, shapeTypeNode, shapeFacets, location, base, defaultType)
 		if err != nil {
-			return nil, fmt.Errorf("make shape type: %w", err)
+			return nil, StacktraceNewWrapped("make shape type", err, base.Location, stacktrace.WithPosition(&base.KeyPos))
 		}
 		if shape != nil {
 			base.SetShape(shape)
@@ -782,10 +860,10 @@ func (r *RAML) makeNewShapeYAML(v *yaml.Node, name string, location string) (*Ba
 	s, err := r.MakeConcreteShapeYAML(base, shapeType, shapeFacets)
 	if err != nil {
 		return nil, StacktraceNewWrapped("make concrete shape", err, base.Location,
-			stacktrace.WithPosition(&base.Position))
+			stacktrace.WithPosition(&base.KeyPos))
 	}
 	if _, ok := s.(*UnknownShape); ok {
-		r.unresolvedShapes.PushBack(base)
+		r.unresolvedShapes = append(r.unresolvedShapes, base)
 	}
 	return base, nil
 }
@@ -795,9 +873,8 @@ func (s *BaseShape) decodeExamples(valueNode *yaml.Node) error {
 		return StacktraceNew("example and examples cannot be defined together", s.Location,
 			WithNodePosition(valueNode))
 	}
-	if valueNode.Kind == yaml.ScalarNode && valueNode.Tag == "!include" {
-		baseDir := filepath.Dir(s.Location)
-		n, err := s.raml.parseNamedExample(filepath.Join(baseDir, valueNode.Value))
+	if valueNode.Kind == yaml.ScalarNode && valueNode.Tag == TagInclude {
+		n, err := s.raml.parseNamedExample(s.raml.noteIncludeRef(valueNode, s.Location))
 		if err != nil {
 			return StacktraceNewWrapped("parse named example", err, s.Location,
 				WithNodePosition(valueNode))
@@ -823,20 +900,112 @@ func (s *BaseShape) decodeExamples(valueNode *yaml.Node) error {
 	return nil
 }
 
+// isBuiltInFacetForType checks if a facet name is a built-in facet for a specific shape type.
+func isBuiltInFacetForType(name, shapeType string) bool {
+	// Check common facets
+	if _, ok := commonFacets[name]; ok {
+		return true
+	}
+	// Check type-specific facets
+	if typeFacets, ok := typeSpecificFacets[shapeType]; ok {
+		if _, ok := typeFacets[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // decodeFacets decodes the facet: "facets" from the YAML node.
 func (s *BaseShape) decodeFacets(valueNode *yaml.Node) error {
 	s.CustomShapeFacetDefinitions = orderedmap.New[string, Property](len(valueNode.Content) / 2)
 	for j := 0; j != len(valueNode.Content); j += 2 {
-		nodeName := valueNode.Content[j].Value
-		data := valueNode.Content[j+1]
+		keyNode := valueNode.Content[j]
+		valueNode := valueNode.Content[j+1]
 
-		propertyName, hasImplicitOptional := s.raml.chompImplicitOptional(nodeName)
-		property, err := s.raml.makeProperty(nodeName, propertyName, data, s.Location, hasImplicitOptional)
+		nodeName := keyNode.Value
+		// Facet names MUST NOT begin with open parenthesis to disambiguate from annotations
+		if len(nodeName) > 0 && nodeName[0] == '(' {
+			return StacktraceNew("facet name must not begin with '('", s.Location,
+				WithNodePosition(keyNode), stacktrace.WithInfo("facet", nodeName))
+		}
+
+		propertyName, hasImplicitOptional := chompImplicitOptional(nodeName)
+		// Check if the facet name conflicts with built-in facets for this shape type
+		if isBuiltInFacetForType(propertyName, s.Type) {
+			return StacktraceNew("cannot redefine built-in facet", s.Location,
+				WithNodePosition(keyNode), stacktrace.WithInfo("facet", nodeName))
+		}
+
+		property, err := s.raml.makeProperty(keyNode, valueNode, propertyName, s.Location, hasImplicitOptional)
 		if err != nil {
 			return StacktraceNewWrapped("make property", err, s.Location,
-				WithNodePosition(data))
+				WithNodePosition(keyNode))
 		}
 		s.CustomShapeFacetDefinitions.Set(property.Name, property)
+	}
+	return nil
+}
+
+// XMLSerialization represents the xml facet for XML serialization configuration.
+type XMLSerialization struct {
+	Attribute *Node[bool]
+	Wrapped   *Node[bool]
+	Name      *Node[string]
+	Namespace *Node[string]
+	Prefix    *Node[string]
+
+	Location string
+	stacktrace.Position
+}
+
+// Decode decodes the XMLSerialization from a YAML node.
+func (x *XMLSerialization) Decode(valueNode *yaml.Node, location string, r *RAML) error {
+	x.Location = location
+	x.Position = NewNodePosition(valueNode)
+	if valueNode.Kind != yaml.MappingNode {
+		return StacktraceNew("xml must be a mapping", location, WithNodePosition(valueNode))
+	}
+	for i := 0; i != len(valueNode.Content); i += 2 {
+		key := valueNode.Content[i]
+		val := valueNode.Content[i+1]
+		fragmentPath, rv, err := r.resolveInclude(val, location)
+		if err != nil {
+			return StacktraceNewWrapped("resolve include", err, location, WithNodePosition(val))
+		}
+		switch key.Value {
+		case XmlAttribute:
+			var attr bool
+			if err := rv.Decode(&attr); err != nil {
+				return StacktraceNewWrapped("decode attribute", err, location, WithNodePosition(val))
+			}
+			x.Attribute = MakeNode(attr, key, val, location, fragmentPath)
+		case XmlWrapped:
+			var wrapped bool
+			if err := rv.Decode(&wrapped); err != nil {
+				return StacktraceNewWrapped("decode wrapped", err, location, WithNodePosition(val))
+			}
+			x.Wrapped = MakeNode(wrapped, key, val, location, fragmentPath)
+		case XmlName:
+			var name string
+			if err := rv.Decode(&name); err != nil {
+				return StacktraceNewWrapped("decode name", err, location, WithNodePosition(val))
+			}
+			x.Name = MakeNode(name, key, val, location, fragmentPath)
+		case XmlNamespace:
+			var namespace string
+			if err := rv.Decode(&namespace); err != nil {
+				return StacktraceNewWrapped("decode namespace", err, location, WithNodePosition(val))
+			}
+			x.Namespace = MakeNode(namespace, key, val, location, fragmentPath)
+		case XmlPrefix:
+			var prefix string
+			if err := rv.Decode(&prefix); err != nil {
+				return StacktraceNewWrapped("decode prefix", err, location, WithNodePosition(val))
+			}
+			x.Prefix = MakeNode(prefix, key, val, location, fragmentPath)
+		default:
+			return StacktraceNew("unknown xml property", location, WithNodePosition(key), stacktrace.WithInfo("property", key.Value))
+		}
 	}
 	return nil
 }
@@ -855,50 +1024,76 @@ func (s *BaseShape) decodeExample(valueNode *yaml.Node) error {
 	return nil
 }
 
-func (s *BaseShape) decodeValueNode(keyNode, valueNode *yaml.Node) (*yaml.Node, []*yaml.Node, error) {
-	var shapeTypeNode *yaml.Node
-	shapeFacets := make([]*yaml.Node, 0)
+func (s *BaseShape) decodeValueNode(keyNode, valueNode *yaml.Node) (typeKeyNode, shapeTypeNode *yaml.Node, shapeFacets []*yaml.Node, err error) {
+	shapeFacets = make([]*yaml.Node, 0)
 
 	switch keyNode.Value {
+	case FacetSchema:
+		fallthrough
 	case FacetType:
+		typeKeyNode = keyNode
 		shapeTypeNode = valueNode
 	case FacetDisplayName:
-		if err := valueNode.Decode(&s.DisplayName); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode display name", err, s.Location,
-				WithNodePosition(valueNode))
+		var sn *ScalarFacet[string]
+		if sn, err = MakeScalarFacetYAML[string](s.raml, keyNode, valueNode, s.Location); err != nil {
+			return
 		}
+		s.DisplayName = sn
 	case FacetDescription:
-		if err := valueNode.Decode(&s.Description); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode description", err, s.Location,
-				WithNodePosition(valueNode))
+		var sn *ScalarFacet[string]
+		if sn, err = MakeScalarFacetYAML[string](s.raml, keyNode, valueNode, s.Location); err != nil {
+			return
 		}
+		s.Description = sn
 	case FacetRequired:
-		if err := valueNode.Decode(&s.Required); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode required", err, s.Location,
-				WithNodePosition(valueNode))
+		var sn *ScalarFacet[bool]
+		if sn, err = MakeScalarFacetYAML[bool](s.raml, keyNode, valueNode, s.Location); err != nil {
+			err = StacktraceNewWrapped("decode required", err, s.Location, WithNodePosition(valueNode))
+			return
 		}
+		s.Required = sn
 	case FacetFacets:
-		if err := s.decodeFacets(valueNode); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode facets", err, s.Location,
+		if err = s.decodeFacets(valueNode); err != nil {
+			err = StacktraceNewWrapped("decode facets", err, s.Location,
 				WithNodePosition(valueNode))
+			return
 		}
 	case FacetExample:
-		if err := s.decodeExample(valueNode); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode example", err, s.Location,
+		if err = s.decodeExample(valueNode); err != nil {
+			err = StacktraceNewWrapped("decode example", err, s.Location,
 				WithNodePosition(valueNode))
+			return
 		}
 	case FacetExamples:
-		if err := s.decodeExamples(valueNode); err != nil {
-			return nil, nil, StacktraceNewWrapped("decode example", err, s.Location,
+		if err = s.decodeExamples(valueNode); err != nil {
+			err = StacktraceNewWrapped("decode example", err, s.Location,
 				WithNodePosition(valueNode))
+			return
 		}
 	case FacetDefault:
-		n, err := s.raml.makeRootNode(valueNode, s.Location)
+		var n *DataNode
+		n, err = s.raml.makeRootNode(keyNode, valueNode, s.Location)
 		if err != nil {
-			return nil, nil, StacktraceNewWrapped("make node default", err, s.Location,
+			err = StacktraceNewWrapped("make node default", err, s.Location,
 				WithNodePosition(valueNode))
+			return
 		}
 		s.Default = n
+	case FacetEnum:
+		enums, enumErr := s.raml.MakeEnum(valueNode, s.Location)
+		if enumErr != nil {
+			err = StacktraceNewWrapped("make enum", enumErr, s.Location, WithNodePosition(valueNode))
+			return
+		}
+		s.Enum = enums
+	case FacetXml:
+		xml := &XMLSerialization{}
+		if err = xml.Decode(valueNode, s.Location, s.raml); err != nil {
+			err = StacktraceNewWrapped("decode xml", err, s.Location,
+				WithNodePosition(valueNode))
+			return
+		}
+		s.XML = xml
 	case FacetAllowedTargets:
 		// if err := valueNode.Decode(&s.AllowedTargets); err != nil {
 		// 	return nil, nil, StacktraceNewWrapped("decode allowed targets", err, s.Location,
@@ -906,42 +1101,51 @@ func (s *BaseShape) decodeValueNode(keyNode, valueNode *yaml.Node) (*yaml.Node, 
 		// }
 	default:
 		if IsCustomDomainExtensionNode(keyNode.Value) {
-			name, de, err := s.raml.unmarshalCustomDomainExtension(s.Location, keyNode, valueNode)
+			var de *DomainExtension
+			de, err = s.raml.unmarshalCustomDomainExtension(s.Location, keyNode, valueNode)
 			if err != nil {
-				return nil, nil, StacktraceNewWrapped("unmarshal custom domain extension", err, s.Location,
+				err = StacktraceNewWrapped("unmarshal custom domain extension", err, s.Location,
 					WithNodePosition(valueNode))
+				return
 			}
-			s.CustomDomainProperties.Set(name, de)
+			s.CustomDomainProperties.Set(de.Name, de)
 		} else {
 			shapeFacets = append(shapeFacets, keyNode, valueNode)
 		}
 	}
-	return shapeTypeNode, shapeFacets, nil
+	return
 }
 
 // decode decodes the shape from the YAML node.
-// It returns the shape type node, facets and an error if any.
-func (s *BaseShape) decode(value *yaml.Node) (*yaml.Node, []*yaml.Node, error) {
+// It returns the type-key node, the shape type node, facets and an error if any.
+func (s *BaseShape) decode(value *yaml.Node) (typeKeyNode, shapeTypeNode *yaml.Node, shapeFacets []*yaml.Node, err error) {
 	// For inline type declaration
 	if value.Kind == yaml.ScalarNode || value.Kind == yaml.SequenceNode {
-		return value, nil, nil
+		return nil, value, nil, nil
 	}
 
 	if value.Kind != yaml.MappingNode {
-		return nil, nil, StacktraceNew("value kind must be map", s.Location, WithNodePosition(value))
+		return nil, nil, nil, StacktraceNew("value kind must be map", s.Location, WithNodePosition(value))
 	}
 
-	var shapeTypeNode *yaml.Node
-	shapeFacets := make([]*yaml.Node, 0)
+	shapeFacets = make([]*yaml.Node, 0)
 
 	for i := 0; i != len(value.Content); i += 2 {
 		node := value.Content[i]
 		valueNode := value.Content[i+1]
-		t, f, err := s.decodeValueNode(node, valueNode)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode value node: %w", err)
+		tk, t, f, decodeErr := s.decodeValueNode(node, valueNode)
+		if decodeErr != nil {
+			return nil, nil, nil, StacktraceNewWrapped("decode value node", decodeErr, s.Location)
 		}
 		if t != nil {
+			// RAML 1.0 forbids defining a body (or shape) with both `type:` and
+			// `schema:` — they are mutually exclusive aliases.
+			if typeKeyNode != nil {
+				return nil, nil, nil, StacktraceNew(
+					"`type` and `schema` are mutually exclusive",
+					s.Location, WithNodePosition(node))
+			}
+			typeKeyNode = tk
 			shapeTypeNode = t
 		}
 		if len(f) > 0 {
@@ -949,5 +1153,5 @@ func (s *BaseShape) decode(value *yaml.Node) (*yaml.Node, []*yaml.Node, error) {
 		}
 	}
 
-	return shapeTypeNode, shapeFacets, nil
+	return
 }

@@ -1,0 +1,20 @@
+#%RAML 1.0
+title: Object Properties API
+
+types:
+  ObjectNoPropertiesType:
+    displayName: Object type (no properties)
+    type: object
+
+  ObjectWithPropertiesType:
+    displayName: Object type (with properties)
+    type: object
+    properties:
+      required?:
+        required: true
+        type: object
+        additionalProperties: false
+      optional:
+        required: false
+        type: object
+        additionalProperties: false

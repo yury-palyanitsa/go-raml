@@ -1,4 +1,4 @@
-// Code generated from ./rdtLexer.g4 by ANTLR 4.13.2. DO NOT EDIT.
+// Code generated from ./RdtLexer.g4 by ANTLR 4.13.2. DO NOT EDIT.
 
 package rdt
 
@@ -15,7 +15,7 @@ var _ = fmt.Printf
 var _ = sync.Once{}
 var _ = unicode.IsLetter
 
-type rdtLexer struct {
+type RdtLexer struct {
 	*antlr.BaseLexer
 	channelNames []string
 	modeNames    []string
@@ -147,19 +147,19 @@ func rdtlexerLexerInit() {
 	}
 }
 
-// rdtLexerInit initializes any static state used to implement rdtLexer. By default the
+// RdtLexerInit initializes any static state used to implement RdtLexer. By default the
 // static state used to implement the lexer is lazily initialized during the first call to
-// NewrdtLexer(). You can call this function if you wish to initialize the static state ahead
+// NewRdtLexer(). You can call this function if you wish to initialize the static state ahead
 // of time.
 func RdtLexerInit() {
 	staticData := &RdtLexerLexerStaticData
 	staticData.once.Do(rdtlexerLexerInit)
 }
 
-// NewrdtLexer produces a new lexer instance for the optional input antlr.CharStream.
-func NewrdtLexer(input antlr.CharStream) *rdtLexer {
+// NewRdtLexer produces a new lexer instance for the optional input antlr.CharStream.
+func NewRdtLexer(input antlr.CharStream) *RdtLexer {
 	RdtLexerInit()
-	l := new(rdtLexer)
+	l := new(RdtLexer)
 	l.BaseLexer = antlr.NewBaseLexer(input)
 	staticData := &RdtLexerLexerStaticData
 	l.Interpreter = antlr.NewLexerATNSimulator(l, staticData.atn, staticData.decisionToDFA, staticData.PredictionContextCache)
@@ -168,34 +168,34 @@ func NewrdtLexer(input antlr.CharStream) *rdtLexer {
 	l.RuleNames = staticData.RuleNames
 	l.LiteralNames = staticData.LiteralNames
 	l.SymbolicNames = staticData.SymbolicNames
-	l.GrammarFileName = "rdtLexer.g4"
+	l.GrammarFileName = "RdtLexer.g4"
 	// TODO: l.EOF = antlr.TokenEOF
 
 	return l
 }
 
-// rdtLexer tokens.
+// RdtLexer tokens.
 const (
-	rdtLexerLPAREN             = 1
-	rdtLexerRPAREN             = 2
-	rdtLexerPIPE               = 3
-	rdtLexerARRAY_NOTATION     = 4
-	rdtLexerOPTIONAL_NOTATION  = 5
-	rdtLexerDOT                = 6
-	rdtLexerSTRING_TYPE        = 7
-	rdtLexerINTEGER_TYPE       = 8
-	rdtLexerNUMBER_TYPE        = 9
-	rdtLexerBOOLEAN_TYPE       = 10
-	rdtLexerDATETIME_TYPE      = 11
-	rdtLexerTIME_ONLY_TYPE     = 12
-	rdtLexerDATETIME_ONLY_TYPE = 13
-	rdtLexerDATE_ONLY_TYPE     = 14
-	rdtLexerFILE_TYPE          = 15
-	rdtLexerNIL_TYPE           = 16
-	rdtLexerANY_TYPE           = 17
-	rdtLexerARRAY_TYPE         = 18
-	rdtLexerOBJECT_TYPE        = 19
-	rdtLexerUNION_TYPE         = 20
-	rdtLexerIDENTIFIER         = 21
-	rdtLexerWS                 = 22
+	RdtLexerLPAREN             = 1
+	RdtLexerRPAREN             = 2
+	RdtLexerPIPE               = 3
+	RdtLexerARRAY_NOTATION     = 4
+	RdtLexerOPTIONAL_NOTATION  = 5
+	RdtLexerDOT                = 6
+	RdtLexerSTRING_TYPE        = 7
+	RdtLexerINTEGER_TYPE       = 8
+	RdtLexerNUMBER_TYPE        = 9
+	RdtLexerBOOLEAN_TYPE       = 10
+	RdtLexerDATETIME_TYPE      = 11
+	RdtLexerTIME_ONLY_TYPE     = 12
+	RdtLexerDATETIME_ONLY_TYPE = 13
+	RdtLexerDATE_ONLY_TYPE     = 14
+	RdtLexerFILE_TYPE          = 15
+	RdtLexerNIL_TYPE           = 16
+	RdtLexerANY_TYPE           = 17
+	RdtLexerARRAY_TYPE         = 18
+	RdtLexerOBJECT_TYPE        = 19
+	RdtLexerUNION_TYPE         = 20
+	RdtLexerIDENTIFIER         = 21
+	RdtLexerWS                 = 22
 )

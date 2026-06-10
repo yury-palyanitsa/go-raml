@@ -1,0 +1,153 @@
+{
+    "@graph": [
+        {
+            "@id": "#8",
+            "@type": [
+                "doc:APIContractProcessingData"
+            ],
+            "apiContract:modelVersion": "3.8.2",
+            "doc:transformed": true,
+            "doc:sourceSpec": "RAML 1.0"
+        },
+        {
+            "@id": "#9",
+            "@type": [
+                "apiContract:WebAPI",
+                "apiContract:API",
+                "doc:RootDomainElement",
+                "doc:DomainElement"
+            ],
+            "core:name": "test"
+        },
+        {
+            "@id": "",
+            "doc:declares": [
+                {
+                    "@id": "#1"
+                },
+                {
+                    "@id": "#5"
+                }
+            ],
+            "@type": [
+                "doc:Document",
+                "doc:Fragment",
+                "doc:Module",
+                "doc:Unit"
+            ],
+            "doc:encodes": {
+                "@id": "#9"
+            },
+            "doc:root": true,
+            "doc:processingData": {
+                "@id": "#8"
+            }
+        },
+        {
+            "@id": "#1",
+            "@type": [
+                "sh:NodeShape",
+                "raml-shapes:AnyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:closed": false,
+            "sh:property": [
+                {
+                    "@id": "#2"
+                }
+            ],
+            "sh:name": "AnyObjType"
+        },
+        {
+            "@id": "#5",
+            "@type": [
+                "sh:NodeShape",
+                "raml-shapes:AnyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:closed": false,
+            "sh:property": [
+                {
+                    "@id": "#6"
+                }
+            ],
+            "sh:name": "IntegerType"
+        },
+        {
+            "@id": "#2",
+            "@type": [
+                "sh:PropertyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:path": [
+                {
+                    "@id": "http://a.ml/vocabularies/data#a"
+                }
+            ],
+            "raml-shapes:range": {
+                "@id": "#3"
+            },
+            "sh:minCount": 1,
+            "sh:name": "a"
+        },
+        {
+            "@id": "#6",
+            "@type": [
+                "sh:PropertyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:path": [
+                {
+                    "@id": "http://a.ml/vocabularies/data#a"
+                }
+            ],
+            "raml-shapes:range": {
+                "@id": "#7"
+            },
+            "sh:minCount": 1,
+            "sh:name": "a"
+        },
+        {
+            "@id": "#3",
+            "@type": [
+                "raml-shapes:AnyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:name": "a"
+        },
+        {
+            "@id": "#7",
+            "@type": [
+                "raml-shapes:ScalarShape",
+                "raml-shapes:AnyShape",
+                "sh:Shape",
+                "raml-shapes:Shape",
+                "doc:DomainElement"
+            ],
+            "sh:datatype": [
+                {
+                    "@id": "http://www.w3.org/2001/XMLSchema#integer"
+                }
+            ],
+            "sh:name": "a"
+        }
+    ],
+    "@context": {
+        "@base": "amf://id",
+        "raml-shapes": "http://a.ml/vocabularies/shapes#",
+        "doc": "http://a.ml/vocabularies/document#",
+        "apiContract": "http://a.ml/vocabularies/apiContract#",
+        "core": "http://a.ml/vocabularies/core#",
+        "sh": "http://www.w3.org/ns/shacl#"
+    }
+}

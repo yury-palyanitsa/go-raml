@@ -1,0 +1,9 @@
+#%RAML 1.0
+title: Multi Object API
+
+types:
+  Obj1: object
+  Obj2: object
+  MultiObjInline: [Obj1, Obj2]
+  MultiObj:
+    type: [Obj1, Obj2]

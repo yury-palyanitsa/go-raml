@@ -1,61 +1,89 @@
 package raml
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/acronis/go-stacktrace"
+	gopluralize "github.com/gertd/go-pluralize"
 	"gopkg.in/yaml.v3"
 )
+
+// pluralizeClient powers the RAML !singularize / !pluralize template actions.
+// go-pluralize already covers the bulk of our historic irregular list, but it
+// treats medium/media as uncountable and has no rules for memorandum/memoranda
+// or vortex/vortices. We restore parity for those three pairs because the RAML
+// 1.0 TCK fixtures (e.g. ResourceTypes/chaining-functions) and existing
+// generated artefacts depend on them inflecting.
+var pluralizeClient = func() *gopluralize.Client {
+	c := gopluralize.NewClient()
+	c.AddIrregularRule("medium", "media")
+	c.AddIrregularRule("memorandum", "memoranda")
+	c.AddIrregularRule("vortex", "vortices")
+	return c
+}()
 
 type VariableInfo struct {
 	Name      string
 	Substring string
-	Action    string
+	Actions   []string
 }
 
 // Trait must be indexed YAML nodes with special unmarshalling logic since this trait is an Operation template.
 type TraitDefinition struct {
 	ID int64
 
-	Usage string
+	// Name is the declared trait name (the key in the traits: map, e.g. "pageable").
+	Name string
+
+	Usage *Node[string]
 
 	Source            *yaml.Node
 	DeclaredVariables map[string]struct{}
 	NodeVariableIndex map[int][]VariableInfo
-	Precompiled       *Operation
 
 	Link *TraitFragment
 
 	Location string
-	stacktrace.Position
-	raml *RAML
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
+	// anchorFrag is the fragment scope at this trait's declaration site: it both
+	// resolves unqualified type names in shapes produced by this trait's compiled
+	// operations and governs trait-name resolution inside its is: entries.
+	anchorFrag ReferenceResolver
+	raml       *RAML
 }
 
-func (r *RAML) makeTraitDefinition(valueNode *yaml.Node, location string) (*TraitDefinition, error) {
+func (r *RAML) makeTraitDefinition(keyNode, valueNode *yaml.Node, location string) (*TraitDefinition, error) {
+	keyPos := NewNodePosition(valueNode)
+	if keyNode != nil {
+		keyPos = NewNodePosition(keyNode)
+	}
+	pctx := r.currentParseCtx()
 	traitDef := &TraitDefinition{
+		ID:                r.generateSequenceID(),
 		DeclaredVariables: make(map[string]struct{}),
 		NodeVariableIndex: make(map[int][]VariableInfo),
 
-		raml:     r,
-		Position: stacktrace.Position{Line: valueNode.Line, Column: valueNode.Column},
-		Location: location,
+		raml:       r,
+		KeyPos:     keyPos,
+		ValuePos:   NewNodePosition(valueNode),
+		Location:   location,
+		anchorFrag: pctx.AnchorFrag,
 	}
+	if keyNode != nil {
+		traitDef.Name = keyNode.Value
+	}
+
+	r.storeEntityNode(traitDef.ID, keyNode, valueNode)
 
 	if err := traitDef.decode(valueNode); err != nil {
 		return nil, StacktraceNewWrapped("decode trait definition", err, location, WithNodePosition(valueNode))
 	}
 
-	if err := traitDef.collectVariablesIndex(valueNode, 0); err != nil {
-		return nil, StacktraceNewWrapped("collect NodeVariableIndex", err, location, WithNodePosition(valueNode))
-	}
-
-	if len(traitDef.DeclaredVariables) == 0 {
-		operation, err := traitDef.compile(nil)
-		if err != nil {
-			return nil, StacktraceNewWrapped("compile trait definition", err, location, WithNodePosition(valueNode))
+	if traitDef.Source != nil {
+		if err := traitDef.collectVariablesIndex(traitDef.Source, 0); err != nil {
+			return nil, StacktraceNewWrapped("collect variables index", err, location, WithNodePosition(traitDef.Source))
 		}
-		traitDef.Precompiled = operation
 	}
 
 	return traitDef, nil
@@ -65,8 +93,7 @@ func (t *TraitDefinition) decode(node *yaml.Node) error {
 	if node.Tag == TagNull {
 		return nil
 	} else if node.Tag == TagInclude {
-		baseDir := filepath.Dir(t.Location)
-		traitFrag, err := t.raml.parseTraitFragment(filepath.Join(baseDir, node.Value))
+		traitFrag, err := t.raml.parseTraitFragment(t.raml.noteIncludeRef(node, t.Location))
 		if err != nil {
 			return StacktraceNewWrapped("parse trait fragment", err, t.Location, WithNodePosition(node))
 		}
@@ -80,11 +107,17 @@ func (t *TraitDefinition) decode(node *yaml.Node) error {
 	for i := 0; i < len(node.Content); i += 2 {
 		keyNode := node.Content[i]
 		valueNode := node.Content[i+1]
+		fragmentPath, rn, err := t.raml.resolveInclude(valueNode, t.Location)
+		if err != nil {
+			return StacktraceNewWrapped("resolve include", err, t.Location, WithNodePosition(valueNode))
+		}
 		switch keyNode.Value {
-		case "usage":
-			if err := valueNode.Decode(&t.Usage); err != nil {
+		case FacetUsage:
+			var usage string
+			if err := rn.Decode(&usage); err != nil {
 				return StacktraceNewWrapped("decode usage", err, t.Location, WithNodePosition(valueNode))
 			}
+			t.Usage = MakeNode(usage, keyNode, valueNode, t.Location, fragmentPath)
 		default:
 			content = append(content, keyNode, valueNode)
 		}
@@ -100,120 +133,24 @@ func (t *TraitDefinition) decode(node *yaml.Node) error {
 }
 
 func (t *TraitDefinition) collectVariablesIndex(node *yaml.Node, idx int) error {
-	if node.Kind == yaml.ScalarNode {
-		if err := t.findVariable(node, idx); err != nil {
-			return StacktraceNewWrapped("find variable", err, t.Location, WithNodePosition(node))
-		}
-	}
-
-	for i := 0; i < len(node.Content); i++ {
-		if err := t.collectVariablesIndex(node.Content[i], idx+i); err != nil {
-			return StacktraceNewWrapped("collect NodeVariableIndex", err, t.Location, WithNodePosition(node.Content[i]))
-		}
-	}
-	return nil
-}
-
-func (t *TraitDefinition) findVariable(node *yaml.Node, idx int) error {
-	if node.Kind != yaml.ScalarNode {
-		return StacktraceNew("variable must be a scalar node", t.Location, WithNodePosition(node))
-	} else if node.Tag != TagStr {
-		return nil
-	}
-
-	varMatches := TemplateVariableRe.FindAllStringSubmatch(node.Value, -1)
-	if len(varMatches) == 0 {
-		return nil
-	}
-	vars := make([]VariableInfo, len(varMatches))
-	for i, match := range varMatches {
-		substring := match[0]
-		name := match[1]
-		action := match[3]
-		t.DeclaredVariables[name] = struct{}{}
-		vars[i] = VariableInfo{
-			Name:      name,
-			Substring: substring,
-			Action:    action,
-		}
-	}
-	t.NodeVariableIndex[idx] = vars
-	return nil
-}
-
-func (t *TraitDefinition) compile(params map[string]string) (*Operation, error) {
-	// TODO: Proper position handling
-	if t.Link != nil {
-		return t.Link.Trait.compile(params)
-	}
-	for k := range params {
-		if _, ok := t.DeclaredVariables[k]; !ok {
-			return nil, StacktraceNew("unexpected parameter", t.Location, WithNodePosition(t.Source), stacktrace.WithInfo("parameter", k))
-		}
-	}
-	if t.Precompiled != nil {
-		return t.Precompiled, nil
-	}
-	for k := range t.DeclaredVariables {
-		if _, ok := params[k]; !ok {
-			return nil, StacktraceNew("missing required parameter", t.Location, WithNodePosition(t.Source), stacktrace.WithInfo("parameter", k))
-		}
-	}
-	source := t.compileSource(t.Source, params, 0)
-	// TODO: Nodes parametrization must be relative to the document that uses the trait.
-	// Otherwise, node content should be resolved relative to trait definition.
-	// But how do we know in which context the node was inserted?
-	operation, err := t.raml.makeParametrizedOperation(t.Location, source)
-	if err != nil {
-		return nil, StacktraceNewWrapped("make operation", err, t.Location, WithNodePosition(t.Source))
-	}
-	return operation, nil
-}
-
-func (t *TraitDefinition) compileSource(node *yaml.Node, params map[string]string, idx int) *yaml.Node {
-	// Base case: If the node is a scalar and matches a variable in params, replace it
-	if node.Kind == yaml.ScalarNode {
-		variables, exists := t.NodeVariableIndex[idx]
-		if !exists {
-			return node
-		}
-		newNode := *node
-		// TODO: Support template action on string
-		for _, variable := range variables {
-			newNode.Value = strings.Replace(newNode.Value, variable.Substring, params[variable.Name], 1)
-		}
-		return &newNode
-	}
-
-	// Recursive case: If the node is a map or sequence, recursively copy if needed
-	modified := false
-	content := make([]*yaml.Node, len(node.Content)) // Prepare a new slice for children
-	for i := 0; i < len(node.Content); i++ {
-		child := t.compileSource(node.Content[i], params, idx+i) // Recurse on children
-		content[i] = child
-
-		if child != node.Content[i] {
-			modified = true // Mark if any child was modified
-		}
-	}
-
-	if modified {
-		newNode := *node
-		newNode.Content = content
-		return &newNode // Return a new node if any child was modified
-	}
-	return node // No modification, return the original node
+	return collectVariablesIndex(t.Location, node, idx, t.NodeVariableIndex, t.DeclaredVariables)
 }
 
 type Trait struct {
 	ID int64
 
 	Name   string
-	Params map[string]string
+	Params map[string]*yaml.Node
+
+	// Definition is set during trait application and points to the resolved TraitDefinition.
+	Definition *TraitDefinition
 
 	Location string
-	stacktrace.Position
-	raml *RAML
+	ValuePos stacktrace.Position
+	// anchorFrag is the fragment scope at this trait reference's site; its uses:
+	// map governs resolution of dotted trait names (e.g. "traitsLib.pageable").
+	anchorFrag ReferenceResolver
+	raml       *RAML
 }
 
 func (r *RAML) makeTraits(valueNode *yaml.Node, location string) ([]*Trait, error) {
@@ -243,10 +180,13 @@ func (r *RAML) makeTraits(valueNode *yaml.Node, location string) ([]*Trait, erro
 }
 
 func (r *RAML) makeTrait(valueNode *yaml.Node, location string) (*Trait, error) {
+	pctx := r.currentParseCtx()
 	trait := &Trait{
-		Location: location,
-		raml:     r,
-		Position: stacktrace.Position{Line: valueNode.Line, Column: valueNode.Column},
+		ID:         r.generateSequenceID(),
+		Location:   location,
+		anchorFrag: pctx.AnchorFrag,
+		raml:       r,
+		ValuePos:   NewNodePosition(valueNode),
 	}
 
 	if err := trait.decode(valueNode); err != nil {
@@ -264,11 +204,168 @@ func (t *Trait) decode(node *yaml.Node) error {
 		keyNode := node.Content[0]
 		valueNode := node.Content[1]
 		t.Name = keyNode.Value
-		if err := valueNode.Decode(&t.Params); err != nil {
-			return StacktraceNewWrapped("decode trait parameters", err, t.Location, WithNodePosition(valueNode))
+		// Store parameter values as YAML nodes to support complex values (mappings, sequences)
+		t.Params = make(map[string]*yaml.Node, len(valueNode.Content)/2)
+		for i := 0; i < len(valueNode.Content); i += 2 {
+			key := valueNode.Content[i]
+			val := valueNode.Content[i+1]
+			t.Params[key.Value] = val
 		}
 	default:
 		return StacktraceNew("trait must be either scalar or mapping node", t.Location, WithNodePosition(node))
 	}
 	return nil
+}
+
+// applyTemplateAction applies one of the RAML-specified string transformation functions
+// to value. If action is empty or unrecognised, value is returned unchanged.
+func applyTemplateAction(value, action string) string {
+	switch action {
+	case ActionUppercase:
+		return strings.ToUpper(value)
+	case ActionLowercase:
+		return strings.ToLower(value)
+	case ActionUpperCamelCase:
+		return toUpperCamelCase(value)
+	case ActionLowerCamelCase:
+		return toLowerCamelCase(value)
+	case ActionUpperUnderscore:
+		return strings.ToUpper(toUnderscoreCase(value))
+	case ActionLowerUnderscore:
+		return toUnderscoreCase(value)
+	case ActionUpperHyphen:
+		return strings.ToUpper(toHyphenCase(value))
+	case ActionLowerHyphen:
+		return toHyphenCase(value)
+	case ActionSingularize:
+		return singularize(value)
+	case ActionPluralize:
+		return pluralize(value)
+	default:
+		return value
+	}
+}
+
+func toUpperCamelCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	upperNext := true
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		switch c {
+		case ' ', '_', '-':
+			upperNext = true
+			continue
+		}
+
+		if upperNext {
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			upperNext = false
+		} else {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+		}
+
+		b.WriteByte(c)
+	}
+
+	return b.String()
+}
+
+func toLowerCamelCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	upperNext := false
+	first := true
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		switch c {
+		case ' ', '_', '-':
+			upperNext = true
+			continue
+		}
+
+		if first {
+			first = false
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+		} else if upperNext {
+			upperNext = false
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+		} else {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+		}
+
+		b.WriteByte(c)
+	}
+
+	return b.String()
+}
+
+func toUnderscoreCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if c >= 'A' && c <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			c += 'a' - 'A'
+		}
+
+		b.WriteByte(c)
+	}
+
+	return b.String()
+}
+
+func toHyphenCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if c >= 'A' && c <= 'Z' {
+			if i > 0 {
+				b.WriteByte('-')
+			}
+			c += 'a' - 'A'
+		}
+
+		b.WriteByte(c)
+	}
+
+	return b.String()
+}
+
+func singularize(s string) string {
+	if s == "" {
+		return s
+	}
+	return pluralizeClient.Singular(s)
+}
+
+func pluralize(s string) string {
+	if s == "" {
+		return s
+	}
+	return pluralizeClient.Plural(s)
 }

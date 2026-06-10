@@ -1,4 +1,4 @@
-lexer grammar rdtLexer;
+lexer grammar RdtLexer;
 
 // Priority 0
 LPAREN: '(';

@@ -7,38 +7,44 @@ import (
 )
 
 type DomainExtension struct {
-	ID        string
+	ID        int64
 	Name      string
-	Extension *Node
+	Extension *DataNode
 	DefinedBy *BaseShape
 
-	Location string
-	stacktrace.Position
-	raml *RAML
+	Location   string
+	KeyPos     stacktrace.Position
+	ValuePos   stacktrace.Position
+	anchorFrag ReferenceResolver
+	raml       *RAML
 }
 
-func (r *RAML) unmarshalCustomDomainExtension(location string, keyNode *yaml.Node,
-	valueNode *yaml.Node,
-) (string, *DomainExtension, error) {
+func (r *RAML) unmarshalCustomDomainExtension(
+	location string,
+	keyNode, valueNode *yaml.Node,
+) (*DomainExtension, error) {
 	name := keyNode.Value[1 : len(keyNode.Value)-1]
 	if name == "" {
-		return "", nil, StacktraceNew("annotation name must not be empty", location,
+		return nil, StacktraceNew("annotation name must not be empty", location,
 			WithNodePosition(keyNode))
 	}
-	n, err := r.makeRootNode(valueNode, location)
+	n, err := r.makeRootNode(keyNode, valueNode, location)
 	if err != nil {
-		return "", nil, StacktraceNewWrapped("make node", err, location,
+		return nil, StacktraceNewWrapped("make node", err, location,
 			WithNodePosition(valueNode))
 	}
 	de := &DomainExtension{
-		Name:      name,
-		Extension: n,
-		Location:  location,
-		Position:  stacktrace.Position{Line: keyNode.Line, Column: keyNode.Column},
-		raml:      r,
+		ID:         r.generateSequenceID(),
+		Name:       name,
+		Extension:  n,
+		Location:   location,
+		KeyPos:     NewNodePosition(keyNode),
+		ValuePos:   NewNodePosition(valueNode),
+		anchorFrag: r.currentParseCtx().AnchorFrag,
+		raml:       r,
 	}
 	r.domainExtensions = append(r.domainExtensions, de)
-	return name, de, nil
+	return de, nil
 }
 
 func IsCustomDomainExtensionNode(name string) bool {

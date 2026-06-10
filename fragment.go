@@ -2,7 +2,6 @@ package raml
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/acronis/go-stacktrace"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
@@ -26,31 +25,97 @@ const (
 	FragmentSecurityScheme
 )
 
+// String returns the name of the FragmentKind for debugging/logging.
+func (k FragmentKind) String() string {
+	switch k {
+	case FragmentUnknown:
+		return "Unknown"
+	case FragmentLibrary:
+		return "Library"
+	case FragmentDataType:
+		return "DataType"
+	case FragmentNamedExample:
+		return "NamedExample"
+	case FragmentAPI:
+		return "API"
+	case FragmentDocumentationItem:
+		return "DocumentationItem"
+	case FragmentResourceType:
+		return "ResourceType"
+	case FragmentTrait:
+		return "Trait"
+	case FragmentAnnotationTypeDeclaration:
+		return "AnnotationTypeDeclaration"
+	case FragmentOverlay:
+		return "Overlay"
+	case FragmentExtension:
+		return "Extension"
+	case FragmentSecurityScheme:
+		return "SecurityScheme"
+	default:
+		return fmt.Sprintf("FragmentKind(%d)", k)
+	}
+}
+
 // CutReferenceName cuts a reference name into two parts: before and after the dot.
 func CutReferenceName(refName string) (string, string, bool) {
 	// External ref - <fragment>.<identifier>
 	// Local ref - <identifier>
-	return CutLast(refName, ".")
+	return CutLast(refName, '.')
 }
 
 type LocationGetter interface {
 	GetLocation() string
 }
 
-type TraitDefinitionGetter interface {
+// Fragment is the base interface for all RAML fragments.
+// It provides only location information. Capabilities are checked via type assertions.
+type Fragment interface {
+	LocationGetter
+}
+
+// ReferenceResolver resolves type, annotation type, resource type, and trait references
+// from within any typed fragment that declares a "uses:" map.
+// Per the RAML 1.0 spec every typed fragment may carry a "uses:" node that imports a Library
+// and may then reference any of the four declaration kinds exported by that library.
+// Implemented by all typed fragments that support "uses:".
+type ReferenceResolver interface {
+	GetLocation() string
+	GetReferenceType(refName string) (*BaseShape, error)
+	GetReferenceAnnotationType(refName string) (*BaseShape, error)
+	GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error)
 	GetTraitDefinition(refName string) (*TraitDefinition, error)
 }
 
-type SecuritySchemeDefinitionGetter interface {
+// SecuritySchemeResolver can resolve security scheme definitions.
+// Implemented by: Library, APIFragment.
+type SecuritySchemeResolver interface {
 	GetSecuritySchemeDefinition(refName string) (*SecuritySchemeDefinition, error)
 }
 
-type ReferenceTypeGetter interface {
-	GetReferenceType(refName string) (*BaseShape, error)
-}
-
-type ReferenceAnnotationTypeGetter interface {
-	GetReferenceAnnotationType(refName string) (*BaseShape, error)
+// filterFragmentUses scans a mapping node for the top-level "uses:" key, unmarshals it,
+// and returns a shallow copy of the node with that key removed. It is used by fragment
+// UnmarshalYAML implementations that need to strip fragment-level library declarations
+// before forwarding the node to a definition decoder.
+func (r *RAML) filterFragmentUses(node *yaml.Node, location string) (*yaml.Node, *orderedmap.OrderedMap[string, *LibraryLink], error) {
+	filteredContent := make([]*yaml.Node, 0, len(node.Content))
+	uses := orderedmap.New[string, *LibraryLink](0)
+	for i := 0; i < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valueNode := node.Content[i+1]
+		if keyNode.Value == FacetUses {
+			u, err := r.unmarshalUses(valueNode, location)
+			if err != nil {
+				return nil, nil, StacktraceNewWrapped("parse uses", err, location, WithNodePosition(valueNode))
+			}
+			uses = u
+		} else {
+			filteredContent = append(filteredContent, keyNode, valueNode)
+		}
+	}
+	filtered := *node
+	filtered.Content = filteredContent
+	return &filtered, uses, nil
 }
 
 func (r *RAML) unmarshalUses(valueNode *yaml.Node, location string) (*orderedmap.OrderedMap[string, *LibraryLink], error) {
@@ -62,12 +127,19 @@ func (r *RAML) unmarshalUses(valueNode *yaml.Node, location string) (*orderedmap
 
 	uses := orderedmap.New[string, *LibraryLink](len(valueNode.Content) / 2)
 	for j := 0; j != len(valueNode.Content); j += 2 {
-		name := valueNode.Content[j].Value
+		keyNode := valueNode.Content[j]
+		name := keyNode.Value
+		// Check for duplicate library name.
+		if _, exists := uses.Get(name); exists {
+			return nil, StacktraceNew("duplicate library name", location, WithNodePosition(keyNode), stacktrace.WithInfo("library", name))
+		}
 		path := valueNode.Content[j+1]
 		uses.Set(name, &LibraryLink{
+			ID:       r.generateSequenceID(),
 			Value:    path.Value,
 			Location: location,
-			Position: stacktrace.Position{Line: path.Line, Column: path.Column},
+			KeyPos:   NewNodePosition(keyNode),
+			ValuePos: NewNodePosition(path),
 		})
 	}
 	return uses, nil
@@ -82,14 +154,24 @@ func (r *RAML) unmarshalTypes(valueNode *yaml.Node, location string, isAnnotatio
 
 	types := orderedmap.New[string, *BaseShape](len(valueNode.Content) / 2)
 	for j := 0; j != len(valueNode.Content); j += 2 {
-		name := valueNode.Content[j].Value
-		data := valueNode.Content[j+1]
-		shape, err := r.makeNewShapeYAML(data, name, location)
+		keyNode := valueNode.Content[j]
+		name := keyNode.Value
+		// Check for duplicate type name.
+		if _, exists := types.Get(name); exists {
+			return nil, StacktraceNew("duplicate type name", location, WithNodePosition(keyNode), stacktrace.WithInfo("type", name))
+		}
+		valueNode := valueNode.Content[j+1]
+		// Check if the type name is a built-in type
+		if _, ok := SetOfBuiltInTypes[name]; ok {
+			return nil, StacktraceNew("cannot redefine built-in type", location, WithNodePosition(keyNode), stacktrace.WithInfo("type", name))
+		}
+		shape, err := r.makeNewShapeYAML(keyNode, valueNode, location)
 		if err != nil {
-			return nil, StacktraceNewWrapped("unmarshal types: make shape", err, location, WithNodePosition(data))
+			return nil, StacktraceNewWrapped("unmarshal types: make shape", err, location, WithNodePosition(keyNode))
 		}
 		types.Set(name, shape)
 		if isAnnotationType {
+			shape.IsAnnotationType = true
 			r.PutAnnotationTypeIntoFragment(name, location, shape)
 		} else {
 			r.PutTypeIntoFragment(name, location, shape)
@@ -99,18 +181,10 @@ func (r *RAML) unmarshalTypes(valueNode *yaml.Node, location string, isAnnotatio
 	return types, nil
 }
 
-type Fragment interface {
-	LocationGetter
-	SecuritySchemeDefinitionGetter
-	TraitDefinitionGetter
-	ReferenceTypeGetter
-	ReferenceAnnotationTypeGetter
-}
-
 // Library is the RAML 1.0 Library
 type Library struct {
-	ID    string
-	Usage string
+	ID    int64
+	Usage *ScalarFacet[string]
 
 	AnnotationTypes *orderedmap.OrderedMap[string, *BaseShape]
 	ResourceTypes   *orderedmap.OrderedMap[string, *ResourceTypeDefinition]
@@ -125,123 +199,46 @@ type Library struct {
 	raml     *RAML
 }
 
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
+// GetReferenceType returns a reference type by name, implementing the ReferenceResolver interface.
 func (l *Library) GetReferenceType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	//nolint:nestif // Contains simple checks.
-	if !found {
-		rr, ok := l.Types.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		// If reference name has dots, verify if it's a reference to a local type first
-		rr, hasType := l.Types.Get(refName)
-		if !hasType {
-			// If it's not, then check external references
-			lib, ok := l.Uses.Get(before)
-			if !ok {
-				return nil, fmt.Errorf("library \"%s\" not found", before)
-			}
-			rr, ok = lib.Link.Types.Get(after)
-			if !ok {
-				return nil, fmt.Errorf("reference \"%s\" not found", after)
-			}
-		}
-		ref = rr
-	}
-
-	return ref, nil
+	return resolveReference(l.Types, l.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
 func (l *Library) GetSecuritySchemeDefinition(refName string) (*SecuritySchemeDefinition, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *SecuritySchemeDefinition
-
-	if !found {
-		rr, ok := l.SecuritySchemes.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := l.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.SecuritySchemes.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
-	}
-
-	return ref, nil
+	return resolveReference(l.SecuritySchemes, l.Uses, refName, func(lib *Library, suffix string) (*SecuritySchemeDefinition, bool) {
+		return lib.SecuritySchemes.Get(suffix)
+	})
 }
 
 // GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
+// implementing the ReferenceResolver interface.
+// Falls back to regular Types when the name is not found in AnnotationTypes,
+// because annotation types share type-declaration syntax with regular types
+// (RAML 1.0 §"Annotation Types").
 func (l *Library) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	//nolint:nestif // Contains simple checks.
-	if !found {
-		rr, ok := l.AnnotationTypes.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		// If reference name has dots, verify if it's a reference to a local type first
-		rr, isType := l.AnnotationTypes.Get(refName)
-		if !isType {
-			// If it's not, then check external references
-			lib, ok := l.Uses.Get(before)
-			if !ok {
-				return nil, fmt.Errorf("library \"%s\" not found", before)
-			}
-			rr, ok = lib.Link.AnnotationTypes.Get(after)
-			if !ok {
-				return nil, fmt.Errorf("reference \"%s\" not found", after)
-			}
-		}
-		ref = rr
+	if ref, err := resolveReference(l.AnnotationTypes, l.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
 	}
-
-	return ref, nil
+	// Annotation types may reference regular types from the same namespace.
+	return resolveReference(l.Types, l.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
 func (l *Library) GetTraitDefinition(refName string) (*TraitDefinition, error) {
-	before, after, found := CutReferenceName(refName)
+	return resolveReference(l.Traits, l.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
 
-	var ref *TraitDefinition
-
-	if !found {
-		rr, ok := l.Traits.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := l.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.Traits.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
-	}
-
-	return ref, nil
+func (l *Library) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveReference(l.ResourceTypes, l.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
 }
 
 func (l *Library) GetLocation() string {
@@ -249,13 +246,14 @@ func (l *Library) GetLocation() string {
 }
 
 type LibraryLink struct {
-	ID    string
+	ID    int64
 	Value string
 
 	Link *Library
 
 	Location string
-	stacktrace.Position
+	KeyPos   stacktrace.Position // position of the key node (the alias)
+	ValuePos stacktrace.Position // position of the value node (the path string)
 }
 
 // UnmarshalYAML unmarshals a Library from a yaml.Node, implementing the yaml.Unmarshaler interface
@@ -264,51 +262,81 @@ func (l *Library) UnmarshalYAML(value *yaml.Node) error {
 		return StacktraceNew("must be map", l.Location, WithNodePosition(value))
 	}
 
+	hasTypes := false
+	hasSchemas := false
 	for i := 0; i != len(value.Content); i += 2 {
 		node := value.Content[i]
 		valueNode := value.Content[i+1]
 		switch node.Value {
-		case "uses":
+		case FacetUses:
 			uses, err := l.raml.unmarshalUses(valueNode, l.Location)
 			if err != nil {
 				return StacktraceNewWrapped("parse uses", err, l.Location, WithNodePosition(valueNode))
 			}
 			l.Uses = uses
-		case "types":
+		case FacetTypes:
+			if hasSchemas {
+				return StacktraceNew("types and schemas are mutually exclusive", l.Location, WithNodePosition(valueNode))
+			}
+			hasTypes = true
 			types, err := l.raml.unmarshalTypes(valueNode, l.Location, false)
 			if err != nil {
 				return StacktraceNewWrapped("parse types", err, l.Location, WithNodePosition(valueNode))
 			}
 			l.Types = types
-		case "annotationTypes":
+		case FacetAnnotationTypes:
 			types, err := l.raml.unmarshalTypes(valueNode, l.Location, true)
 			if err != nil {
 				return StacktraceNewWrapped("parse annotation types", err, l.Location, WithNodePosition(valueNode))
 			}
 			l.AnnotationTypes = types
-		case "securitySchemes":
-		case "resourceTypes":
-		case "traits":
+		case FacetSecuritySchemes:
+			securitySchemeDefs, err := l.raml.unmarshalSecuritySchemes(valueNode, l.Location)
+			if err != nil {
+				return StacktraceNewWrapped("unmarshal security scheme definitions", err, l.Location, WithNodePosition(valueNode))
+			}
+			l.SecuritySchemes = securitySchemeDefs
+		case FacetResourceTypes:
+			rtDefs, err := l.raml.unmarshalResourceTypeDefinitions(valueNode, l.Location)
+			if err != nil {
+				return StacktraceNewWrapped("unmarshal resource type definitions", err, l.Location, WithNodePosition(valueNode))
+			}
+			if rtDefs != nil {
+				l.ResourceTypes = rtDefs
+			}
+		case FacetTraits:
 			traitDefs, err := l.raml.unmarshalTraitDefinitions(valueNode, l.Location)
 			if err != nil {
 				return StacktraceNewWrapped("unmarshal trait definitions", err, l.Location, WithNodePosition(valueNode))
 			}
 			l.Traits = traitDefs
-		case "usage":
-			if err := valueNode.Decode(&l.Usage); err != nil {
-				return StacktraceNewWrapped("parse usage: value node decode", err, l.Location,
-					WithNodePosition(valueNode))
+		case FacetSchemas:
+			// "schemas" is a deprecated alias for "types" (RAML 1.0 backward compat)
+			if hasTypes {
+				return StacktraceNew("schemas and types are mutually exclusive", l.Location, WithNodePosition(valueNode))
 			}
+			hasSchemas = true
+			types, err := l.raml.unmarshalTypes(valueNode, l.Location, false)
+			if err != nil {
+				return StacktraceNewWrapped("parse schemas (types)", err, l.Location, WithNodePosition(valueNode))
+			}
+			l.Types = types
+		case FacetUsage:
+			sn, err := MakeScalarFacetYAML[string](l.raml, node, valueNode, l.Location)
+			if err != nil {
+				return StacktraceNewWrapped("make scalar node", err, l.Location, WithNodePosition(valueNode))
+			}
+			l.Usage = sn
 		default:
 			if IsCustomDomainExtensionNode(node.Value) {
-				name, de, err := l.raml.unmarshalCustomDomainExtension(l.Location, node, valueNode)
+				de, err := l.raml.unmarshalCustomDomainExtension(l.Location, node, valueNode)
 				if err != nil {
 					return StacktraceNewWrapped("unmarshal custom domain extension", err, l.Location,
 						WithNodePosition(valueNode))
 				}
-				l.CustomDomainProperties.Set(name, de)
+				l.CustomDomainProperties.Set(de.Name, de)
 			} else {
-				return StacktraceNew("unknown field", l.Location, stacktrace.WithInfo("field", node.Value))
+				return StacktraceNew("unknown field", l.Location, WithNodePosition(node), stacktrace.WithInfo("field", node.Value))
 			}
 		}
 	}
@@ -318,10 +346,14 @@ func (l *Library) UnmarshalYAML(value *yaml.Node) error {
 
 func (r *RAML) MakeLibrary(path string) *Library {
 	return &Library{
+		ID:                     r.generateSequenceID(),
 		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
 		Uses:                   orderedmap.New[string, *LibraryLink](0),
 		Types:                  orderedmap.New[string, *BaseShape](0),
 		AnnotationTypes:        orderedmap.New[string, *BaseShape](0),
+		Traits:                 orderedmap.New[string, *TraitDefinition](0),
+		SecuritySchemes:        orderedmap.New[string, *SecuritySchemeDefinition](0),
+		ResourceTypes:          orderedmap.New[string, *ResourceTypeDefinition](0),
 
 		Location: path,
 		raml:     r,
@@ -330,7 +362,7 @@ func (r *RAML) MakeLibrary(path string) *Library {
 
 // DataTypeFragment is the RAML 1.0 DataType
 type DataTypeFragment struct {
-	ID string
+	ID int64
 
 	Uses *orderedmap.OrderedMap[string, *LibraryLink]
 
@@ -340,57 +372,41 @@ type DataTypeFragment struct {
 	raml     *RAML
 }
 
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
+// GetReferenceType returns a reference type by name, implementing the ReferenceResolver interface.
 func (dt *DataTypeFragment) GetReferenceType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	if !found {
-		return nil, fmt.Errorf("invalid reference %s", refName)
-	}
-	// NOTE: DataType does not define local types, only references to library types
-	lib, ok := dt.Uses.Get(before)
-	if !ok {
-		return nil, fmt.Errorf("library \"%s\" not found", before)
-	}
-	ref, ok = lib.Link.Types.Get(after)
-	if !ok {
-		return nil, fmt.Errorf("reference \"%s\" not found", after)
-	}
-
-	return ref, nil
+	return resolveLibraryReference(dt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
 // GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
+// implementing the ReferenceResolver interface. Falls back to the library's
+// regular Types when the name is not found in AnnotationTypes.
 func (dt *DataTypeFragment) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	if !found {
-		return nil, fmt.Errorf("invalid reference %s", refName)
+	if ref, err := resolveLibraryReference(dt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
 	}
-	// NOTE: DataType does not define local types, only references to library types
-	lib, ok := dt.Uses.Get(before)
-	if !ok {
-		return nil, fmt.Errorf("library \"%s\" not found", before)
-	}
-	ref, ok = lib.Link.AnnotationTypes.Get(after)
-	if !ok {
-		return nil, fmt.Errorf("reference \"%s\" not found", after)
-	}
-
-	return ref, nil
+	return resolveLibraryReference(dt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
-func (dt *DataTypeFragment) GetSecuritySchemeDefinition(_ string) (*SecuritySchemeDefinition, error) {
-	return nil, fmt.Errorf("data type does not define security schemes")
+// GetResourceTypeDefinition returns a resource type definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (dt *DataTypeFragment) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveLibraryReference(dt.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
 }
 
+// GetTraitDefinition returns a trait definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
 func (dt *DataTypeFragment) GetTraitDefinition(refName string) (*TraitDefinition, error) {
-	return nil, fmt.Errorf("data type does not define traits")
+	return resolveLibraryReference(dt.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
 }
 
 func (dt *DataTypeFragment) GetLocation() string {
@@ -401,27 +417,15 @@ func (dt *DataTypeFragment) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.MappingNode {
 		return StacktraceNew("must be map", dt.Location, WithNodePosition(value))
 	}
-
-	shapeValue := &yaml.Node{
-		Kind: yaml.MappingNode,
-	}
-	for i := 0; i != len(value.Content); i += 2 {
-		node := value.Content[i]
-		valueNode := value.Content[i+1]
-		switch node.Value {
-		case "uses":
-			uses, err := dt.raml.unmarshalUses(valueNode, dt.Location)
-			if err != nil {
-				return StacktraceNewWrapped("parse uses", err, dt.Location, WithNodePosition(valueNode))
-			}
-			dt.Uses = uses
-		default:
-			shapeValue.Content = append(shapeValue.Content, node, valueNode)
-		}
-	}
-	shape, err := dt.raml.makeNewShapeYAML(shapeValue, filepath.Base(dt.Location), dt.Location)
+	filtered, uses, err := dt.raml.filterFragmentUses(value, dt.Location)
 	if err != nil {
-		return StacktraceNewWrapped("parse types: make shape", err, dt.Location, WithNodePosition(shapeValue))
+		return StacktraceNewWrapped("filter fragment uses", err, dt.Location)
+	}
+	dt.Uses = uses
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: uriBase(dt.Location), Tag: "!!str"}
+	shape, err := dt.raml.makeNewShapeYAML(keyNode, filtered, dt.Location)
+	if err != nil {
+		return StacktraceNewWrapped("parse types: make shape", err, dt.Location, WithNodePosition(keyNode))
 	}
 	dt.Shape = shape
 	dt.raml.PutTypeDefinitionIntoFragment(dt.Location, shape)
@@ -430,8 +434,8 @@ func (dt *DataTypeFragment) UnmarshalYAML(value *yaml.Node) error {
 
 func (r *RAML) MakeDataTypeFragment(path string) *DataTypeFragment {
 	return &DataTypeFragment{
-		Uses: orderedmap.New[string, *LibraryLink](0),
-
+		ID:       r.generateSequenceID(),
+		Uses:     orderedmap.New[string, *LibraryLink](0),
 		Location: path,
 		raml:     r,
 	}
@@ -464,7 +468,7 @@ func (r *RAML) MakeJSONDataType(value []byte, path string) (*DataTypeFragment, e
 // NamedExample is the RAML 1.0 NamedExample
 type NamedExample struct {
 	// FIXME: NamedExampleFragment should follow the same pattern as other generic fragments.
-	ID string
+	ID int64
 
 	Uses *orderedmap.OrderedMap[string, *LibraryLink]
 
@@ -474,31 +478,50 @@ type NamedExample struct {
 	raml     *RAML
 }
 
-// GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
-func (ne *NamedExample) GetReferenceAnnotationType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("named example does not define references")
-}
-
-func (ne *NamedExample) GetSecuritySchemeDefinition(_ string) (*SecuritySchemeDefinition, error) {
-	return nil, fmt.Errorf("named example does not define security schemes")
-}
-
-func (ne *NamedExample) GetTraitDefinition(_ string) (*TraitDefinition, error) {
-	return nil, fmt.Errorf("named example does not define traits")
-}
-
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
-func (ne *NamedExample) GetReferenceType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("named example does not define references")
-}
-
 func (ne *NamedExample) GetLocation() string {
 	return ne.Location
 }
 
+// GetReferenceType returns a reference type by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (ne *NamedExample) GetReferenceType(refName string) (*BaseShape, error) {
+	return resolveLibraryReference(ne.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetReferenceAnnotationType returns a reference annotation type by name via this fragment's uses,
+// implementing the ReferenceResolver interface. Falls back to the library's regular Types.
+func (ne *NamedExample) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
+	if ref, err := resolveLibraryReference(ne.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
+	}
+	return resolveLibraryReference(ne.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetTraitDefinition returns a trait definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (ne *NamedExample) GetTraitDefinition(refName string) (*TraitDefinition, error) {
+	return resolveLibraryReference(ne.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
+
+// GetResourceTypeDefinition returns a resource type definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (ne *NamedExample) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveLibraryReference(ne.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
+}
+
 func (r *RAML) MakeNamedExample(path string) *NamedExample {
 	return &NamedExample{
+		ID:       r.generateSequenceID(),
 		Location: path,
 		raml:     r,
 	}
@@ -508,24 +531,20 @@ func (ne *NamedExample) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.MappingNode {
 		return StacktraceNew("must be map", ne.Location, WithNodePosition(value))
 	}
-	examples := orderedmap.New[string, *Example](len(value.Content) / 2)
-	for i := 0; i != len(value.Content); i += 2 {
-		node := value.Content[i]
-		valueNode := value.Content[i+1]
-		switch node.Value {
-		case "uses":
-			uses, err := ne.raml.unmarshalUses(valueNode, ne.Location)
-			if err != nil {
-				return StacktraceNewWrapped("parse uses", err, ne.Location, WithNodePosition(valueNode))
-			}
-			ne.Uses = uses
-		default:
-			example, err := ne.raml.makeExample(valueNode, node.Value, ne.Location)
-			if err != nil {
-				return StacktraceNewWrapped("make example", err, ne.Location, WithNodePosition(valueNode))
-			}
-			examples.Set(node.Value, example)
+	filtered, uses, err := ne.raml.filterFragmentUses(value, ne.Location)
+	if err != nil {
+		return StacktraceNewWrapped("filter fragment uses", err, ne.Location)
+	}
+	ne.Uses = uses
+	examples := orderedmap.New[string, *Example](len(filtered.Content) / 2)
+	for i := 0; i != len(filtered.Content); i += 2 {
+		node := filtered.Content[i]
+		valueNode := filtered.Content[i+1]
+		example, err := ne.raml.makeExample(valueNode, node.Value, ne.Location)
+		if err != nil {
+			return StacktraceNewWrapped("make example", err, ne.Location, WithNodePosition(valueNode))
 		}
+		examples.Set(node.Value, example)
 	}
 	ne.Map = examples
 
@@ -547,11 +566,69 @@ type ResourceTypeFragment struct {
 
 func (r *RAML) MakeResourceTypeFragment(path string) *ResourceTypeFragment {
 	return &ResourceTypeFragment{
-		Uses: orderedmap.New[string, *LibraryLink](0),
-
+		ID:       r.generateSequenceID(),
+		Uses:     orderedmap.New[string, *LibraryLink](0),
 		Location: path,
 		raml:     r,
 	}
+}
+
+func (rt *ResourceTypeFragment) GetLocation() string {
+	return rt.Location
+}
+
+// GetReferenceType returns a reference type by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (rt *ResourceTypeFragment) GetReferenceType(refName string) (*BaseShape, error) {
+	return resolveLibraryReference(rt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetReferenceAnnotationType returns a reference annotation type by name via this fragment's uses,
+// implementing the ReferenceResolver interface. Falls back to the library's regular Types.
+func (rt *ResourceTypeFragment) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
+	if ref, err := resolveLibraryReference(rt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
+	}
+	return resolveLibraryReference(rt.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetTraitDefinition resolves a dotted trait reference via this fragment's uses: map,
+// implementing the ReferenceResolver interface.
+func (rt *ResourceTypeFragment) GetTraitDefinition(refName string) (*TraitDefinition, error) {
+	return resolveLibraryReference(rt.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
+
+// GetResourceTypeDefinition returns a resource type definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (rt *ResourceTypeFragment) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveLibraryReference(rt.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
+}
+
+func (rt *ResourceTypeFragment) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return StacktraceNew("resource type fragment must be a map", rt.Location, WithNodePosition(node))
+	}
+	filtered, uses, err := rt.raml.filterFragmentUses(node, rt.Location)
+	if err != nil {
+		return StacktraceNewWrapped("filter fragment uses", err, rt.Location)
+	}
+	rt.Uses = uses
+	rtDef, err := rt.raml.makeResourceTypeDefinition(nil, filtered, rt.Location)
+	if err != nil {
+		return StacktraceNewWrapped("make resource type definition", err, rt.Location, WithNodePosition(node))
+	}
+	rt.ResourceType = rtDef
+	return nil
 }
 
 type TraitFragment struct {
@@ -565,31 +642,57 @@ type TraitFragment struct {
 	raml     *RAML
 }
 
-// GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
-func (t *TraitFragment) GetReferenceAnnotationType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("trait does not define references")
-}
-
-func (t *TraitFragment) GetTraitDefinition(_ string) (*TraitDefinition, error) {
-	return nil, fmt.Errorf("trait does not define traits")
-}
-
-func (t *TraitFragment) GetSecuritySchemeDefinition(_ string) (*SecuritySchemeDefinition, error) {
-	return nil, fmt.Errorf("trait does not define security schemes")
-}
-
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
-func (t *TraitFragment) GetReferenceType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("trait does not define references")
-}
-
 func (t *TraitFragment) GetLocation() string {
 	return t.Location
 }
 
+// GetReferenceType returns a reference type by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (t *TraitFragment) GetReferenceType(refName string) (*BaseShape, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetReferenceAnnotationType returns a reference annotation type by name via this fragment's uses,
+// implementing the ReferenceResolver interface. Falls back to the library's regular Types.
+func (t *TraitFragment) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
+	if ref, err := resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
+	}
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetTraitDefinition resolves a dotted trait reference via this fragment's uses: map,
+// implementing the ReferenceResolver interface.
+func (t *TraitFragment) GetTraitDefinition(refName string) (*TraitDefinition, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
+
+// GetResourceTypeDefinition returns a resource type definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (t *TraitFragment) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
+}
+
 func (t *TraitFragment) UnmarshalYAML(node *yaml.Node) error {
-	traitDef, err := t.raml.makeTraitDefinition(node, t.Location)
+	if node.Kind != yaml.MappingNode {
+		return StacktraceNew("trait fragment must be a map", t.Location, WithNodePosition(node))
+	}
+	filtered, uses, err := t.raml.filterFragmentUses(node, t.Location)
+	if err != nil {
+		return StacktraceNewWrapped("filter fragment uses", err, t.Location)
+	}
+	t.Uses = uses
+	traitDef, err := t.raml.makeTraitDefinition(nil, filtered, t.Location)
 	if err != nil {
 		return StacktraceNewWrapped("make trait definition", err, t.Location, WithNodePosition(node))
 	}
@@ -599,8 +702,8 @@ func (t *TraitFragment) UnmarshalYAML(node *yaml.Node) error {
 
 func (r *RAML) MakeTraitFragment(path string) *TraitFragment {
 	return &TraitFragment{
-		Uses: orderedmap.New[string, *LibraryLink](0),
-
+		ID:       r.generateSequenceID(),
+		Uses:     orderedmap.New[string, *LibraryLink](0),
 		Location: path,
 		raml:     r,
 	}
@@ -619,40 +722,66 @@ type SecuritySchemeFragment struct {
 
 func (r *RAML) MakeSecuritySchemeFragment(path string) *SecuritySchemeFragment {
 	return &SecuritySchemeFragment{
-		Uses: orderedmap.New[string, *LibraryLink](0),
-
+		ID:       r.generateSequenceID(),
+		Uses:     orderedmap.New[string, *LibraryLink](0),
 		Location: path,
 		raml:     r,
 	}
-}
-
-// GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
-func (t *SecuritySchemeFragment) GetReferenceAnnotationType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("trait does not define references")
-}
-
-func (t *SecuritySchemeFragment) GetTraitDefinition(_ string) (*TraitDefinition, error) {
-	return nil, fmt.Errorf("trait does not define traits")
-}
-
-func (t *SecuritySchemeFragment) GetSecuritySchemeDefinition(_ string) (*SecuritySchemeDefinition, error) {
-	return nil, fmt.Errorf("trait does not define security schemes")
-}
-
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
-func (t *SecuritySchemeFragment) GetReferenceType(_ string) (*BaseShape, error) {
-	return nil, fmt.Errorf("trait does not define references")
 }
 
 func (t *SecuritySchemeFragment) GetLocation() string {
 	return t.Location
 }
 
+// GetReferenceType returns a reference type by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (t *SecuritySchemeFragment) GetReferenceType(refName string) (*BaseShape, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetReferenceAnnotationType returns a reference annotation type by name via this fragment's uses,
+// implementing the ReferenceResolver interface. Falls back to the library's regular Types.
+func (t *SecuritySchemeFragment) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
+	if ref, err := resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
+	}
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
+}
+
+// GetTraitDefinition returns a trait definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (t *SecuritySchemeFragment) GetTraitDefinition(refName string) (*TraitDefinition, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
+
+// GetResourceTypeDefinition returns a resource type definition by name via this fragment's uses,
+// implementing the ReferenceResolver interface.
+func (t *SecuritySchemeFragment) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveLibraryReference(t.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
+}
+
 func (t *SecuritySchemeFragment) UnmarshalYAML(node *yaml.Node) error {
-	securitySchemeDef, err := t.raml.makeSecuritySchemeDefinition(node, t.Location)
+	if node.Kind != yaml.MappingNode {
+		return StacktraceNew("security scheme fragment must be a map", t.Location, WithNodePosition(node))
+	}
+	filtered, uses, err := t.raml.filterFragmentUses(node, t.Location)
 	if err != nil {
-		return StacktraceNewWrapped("make security scheme definition", err, t.Location, WithNodePosition(node))
+		return StacktraceNewWrapped("filter fragment uses", err, t.Location)
+	}
+	t.Uses = uses
+	securitySchemeDef, err := t.raml.makeSecuritySchemeDefinition(nil, filtered, t.Location)
+	if err != nil {
+		return StacktraceNewWrapped("make security scheme definition", err, t.Location, WithNodePosition(filtered))
 	}
 	t.SecurityScheme = securitySchemeDef
 	return nil
@@ -671,6 +800,8 @@ type DocumentationItemFragment struct {
 
 func (r *RAML) MakeDocumentationItemFragment(path string) *DocumentationItemFragment {
 	return &DocumentationItemFragment{
+		ID: r.generateSequenceID(),
+
 		Uses: orderedmap.New[string, *LibraryLink](0),
 
 		Location: path,
@@ -679,20 +810,20 @@ func (r *RAML) MakeDocumentationItemFragment(path string) *DocumentationItemFrag
 }
 
 type APIFragment struct {
-	ID string
+	ID int64
 
-	Title       string
-	Description string
-	Version     string
+	Title       *ScalarFacet[string]
+	Description *ScalarFacet[string]
+	Version     *ScalarFacet[string]
 
 	Documentation []*DocumentationItem
 
 	// NOTE: We might want to keep forward compatibility with OpenAPI and define multiple servers
-	BaseURI           string
+	BaseURI           *ScalarFacet[string]
 	BaseURIParameters *orderedmap.OrderedMap[string, *BaseShape]
-	Protocols         []string
+	Protocols         []*Node[string]
 
-	MediaType []string          // Global media types
+	MediaType []*Node[string]   // Global media types
 	SecuredBy []*SecurityScheme // Global security schemes
 
 	AnnotationTypes *orderedmap.OrderedMap[string, *BaseShape]
@@ -704,6 +835,11 @@ type APIFragment struct {
 
 	EndPoints *orderedmap.OrderedMap[string, *EndPoint]
 
+	// sourceEndPoints holds the stage-1 IR of the API's top-level endpoints,
+	// produced during decode and consumed by buildEndPoints (resolve directives,
+	// merge resource types/traits, materialize) before resolveShapes.
+	sourceEndPoints []*SourceEndPoint
+
 	CustomDomainProperties *orderedmap.OrderedMap[string, *DomainExtension]
 
 	Location string
@@ -712,6 +848,7 @@ type APIFragment struct {
 
 func (r *RAML) MakeAPIFragment(path string) *APIFragment {
 	return &APIFragment{
+		ID:                     r.generateSequenceID(),
 		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
 		Uses:                   orderedmap.New[string, *LibraryLink](0),
 		Types:                  orderedmap.New[string, *BaseShape](0),
@@ -720,9 +857,8 @@ func (r *RAML) MakeAPIFragment(path string) *APIFragment {
 		SecuritySchemes:        orderedmap.New[string, *SecuritySchemeDefinition](0),
 		AnnotationTypes:        orderedmap.New[string, *BaseShape](0),
 		EndPoints:              orderedmap.New[string, *EndPoint](0),
-
-		Location: path,
-		raml:     r,
+		Location:               path,
+		raml:                   r,
 	}
 }
 
@@ -730,111 +866,43 @@ func (api *APIFragment) GetLocation() string {
 	return api.Location
 }
 
-// GetReferenceType returns a reference type by name, implementing the ReferenceTypeGetter interface
+// GetReferenceType returns a reference type by name, implementing the ReferenceResolver interface.
 func (api *APIFragment) GetReferenceType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	if !found {
-		rr, ok := api.Types.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := api.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.Types.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
-	}
-
-	return ref, nil
+	return resolveReference(api.Types, api.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
 // GetReferenceAnnotationType returns a reference annotation type by name,
-// implementing the ReferenceAnnotationTypeGetter interface
+// implementing the ReferenceResolver interface. Falls back to regular Types.
 func (api *APIFragment) GetReferenceAnnotationType(refName string) (*BaseShape, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *BaseShape
-
-	if !found {
-		rr, ok := api.AnnotationTypes.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := api.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.AnnotationTypes.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
+	if ref, err := resolveReference(api.AnnotationTypes, api.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.AnnotationTypes.Get(suffix)
+	}); err == nil {
+		return ref, nil
 	}
-
-	return ref, nil
+	// Annotation types may reference regular types from the same namespace.
+	return resolveReference(api.Types, api.Uses, refName, func(lib *Library, suffix string) (*BaseShape, bool) {
+		return lib.Types.Get(suffix)
+	})
 }
 
 func (api *APIFragment) GetTraitDefinition(refName string) (*TraitDefinition, error) {
-	before, after, found := CutReferenceName(refName)
+	return resolveReference(api.Traits, api.Uses, refName, func(lib *Library, suffix string) (*TraitDefinition, bool) {
+		return lib.Traits.Get(suffix)
+	})
+}
 
-	var ref *TraitDefinition
-
-	if !found {
-		rr, ok := api.Traits.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := api.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.Traits.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
-	}
-
-	return ref, nil
+func (api *APIFragment) GetResourceTypeDefinition(refName string) (*ResourceTypeDefinition, error) {
+	return resolveReference(api.ResourceTypes, api.Uses, refName, func(lib *Library, suffix string) (*ResourceTypeDefinition, bool) {
+		return lib.ResourceTypes.Get(suffix)
+	})
 }
 
 func (api *APIFragment) GetSecuritySchemeDefinition(refName string) (*SecuritySchemeDefinition, error) {
-	before, after, found := CutReferenceName(refName)
-
-	var ref *SecuritySchemeDefinition
-
-	if !found {
-		rr, ok := api.SecuritySchemes.Get(refName)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", refName)
-		}
-		ref = rr
-	} else {
-		lib, ok := api.Uses.Get(before)
-		if !ok {
-			return nil, fmt.Errorf("library \"%s\" not found", before)
-		}
-		rr, ok := lib.Link.SecuritySchemes.Get(after)
-		if !ok {
-			return nil, fmt.Errorf("reference \"%s\" not found", after)
-		}
-		ref = rr
-	}
-
-	return ref, nil
+	return resolveReference(api.SecuritySchemes, api.Uses, refName, func(lib *Library, suffix string) (*SecuritySchemeDefinition, bool) {
+		return lib.SecuritySchemes.Get(suffix)
+	})
 }
 
 func (api *APIFragment) UnmarshalYAML(node *yaml.Node) error {
@@ -847,49 +915,68 @@ func (api *APIFragment) UnmarshalYAML(node *yaml.Node) error {
 		return StacktraceNewWrapped("preprocess", err, api.Location)
 	}
 
+	hasTitle := false
+	hasTypes := false
+	hasSchemas := false
 	for i := 0; i != len(filtered); i += 2 {
 		keyNode := filtered[i]
 		valueNode := filtered[i+1]
 		switch keyNode.Value {
-		case "title":
-			if err := valueNode.Decode(&api.Title); err != nil {
-				return StacktraceNewWrapped("parse title: value node decode", err, api.Location, WithNodePosition(valueNode))
+		case FacetTitle:
+			sn, err := MakeScalarFacetYAML[string](api.raml, keyNode, valueNode, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("make scalar node", err, api.Location, WithNodePosition(valueNode))
 			}
-		case "description":
-			if err := valueNode.Decode(&api.Description); err != nil {
-				return StacktraceNewWrapped("parse description: value node decode", err, api.Location, WithNodePosition(valueNode))
+			if sn.Value == "" {
+				return StacktraceNew("title must not be empty", api.Location, WithNodePosition(keyNode))
 			}
-		case "version":
-			if err := valueNode.Decode(&api.Version); err != nil {
-				return StacktraceNewWrapped("parse version: value node decode", err, api.Location, WithNodePosition(valueNode))
+			hasTitle = true
+			api.Title = sn
+		case FacetDescription:
+			sn, err := MakeScalarFacetYAML[string](api.raml, keyNode, valueNode, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("make scalar node", err, api.Location, WithNodePosition(valueNode))
 			}
-		case "baseUri":
-			if err := valueNode.Decode(&api.BaseURI); err != nil {
-				return StacktraceNewWrapped("parse base uri: value node decode", err, api.Location, WithNodePosition(valueNode))
+			api.Description = sn
+		case FacetVersion:
+			sn, err := MakeScalarFacetYAML[string](api.raml, keyNode, valueNode, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("make scalar node", err, api.Location, WithNodePosition(valueNode))
 			}
-		case "baseUriParameters":
+			api.Version = sn
+		case FacetBaseUri:
+			sn, err := MakeScalarFacetYAML[string](api.raml, keyNode, valueNode, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("make scalar node", err, api.Location, WithNodePosition(valueNode))
+			}
+			api.BaseURI = sn
+		case FacetBaseUriParameters:
 			if err := api.unmarshalBaseURIParameters(valueNode); err != nil {
 				return StacktraceNewWrapped("unmarshal base uri parameters", err, api.Location, WithNodePosition(valueNode))
 			}
-		case "documentation":
-			documentationItems, err := api.raml.unmarshalDocumentationItems(valueNode, api.Location)
+		case FacetDocumentation:
+			documentationItems, err := api.raml.unmarshalDocumentationItems(keyNode, valueNode, api.Location)
 			if err != nil {
-				return StacktraceNewWrapped("parse documentation items", err, api.Location, WithNodePosition(valueNode))
+				return StacktraceNewWrapped("parse documentation items", err, api.Location, WithNodePosition(keyNode))
 			}
 			api.Documentation = documentationItems
-		case "types":
+		case FacetTypes:
+			if hasSchemas {
+				return StacktraceNew("types and schemas are mutually exclusive", api.Location, WithNodePosition(valueNode))
+			}
+			hasTypes = true
 			types, err := api.raml.unmarshalTypes(valueNode, api.Location, false)
 			if err != nil {
 				return StacktraceNewWrapped("parse types", err, api.Location, WithNodePosition(valueNode))
 			}
 			api.Types = types
-		case "annotationTypes":
+		case FacetAnnotationTypes:
 			types, err := api.raml.unmarshalTypes(valueNode, api.Location, true)
 			if err != nil {
 				return StacktraceNewWrapped("parse annotation types", err, api.Location, WithNodePosition(valueNode))
 			}
 			api.AnnotationTypes = types
-		case "securitySchemes":
+		case FacetSecuritySchemes:
 			securitySchemeDefs, err := api.raml.unmarshalSecuritySchemes(valueNode, api.Location)
 			if err != nil {
 				return StacktraceNewWrapped("unmarshal security scheme definitions", err, api.Location, WithNodePosition(valueNode))
@@ -901,8 +988,26 @@ func (api *APIFragment) UnmarshalYAML(node *yaml.Node) error {
 				return StacktraceNewWrapped("parse uses", err, api.Location, WithNodePosition(valueNode))
 			}
 			api.Uses = uses
-		case "resourceTypes":
-		case "traits":
+		case FacetResourceTypes:
+			rtDefs, err := api.raml.unmarshalResourceTypeDefinitions(valueNode, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("unmarshal resource type definitions", err, api.Location, WithNodePosition(valueNode))
+			}
+			if rtDefs != nil {
+				api.ResourceTypes = rtDefs
+			}
+		case FacetSchemas:
+			// "schemas" is a deprecated alias for "types" (RAML 1.0 backward compat)
+			if hasTypes {
+				return StacktraceNew("schemas and types are mutually exclusive", api.Location, WithNodePosition(valueNode))
+			}
+			hasSchemas = true
+			types, err := api.raml.unmarshalTypes(valueNode, api.Location, false)
+			if err != nil {
+				return StacktraceNewWrapped("parse schemas (types)", err, api.Location, WithNodePosition(valueNode))
+			}
+			api.Types = types
+		case FacetTraits:
 			traitDefs, err := api.raml.unmarshalTraitDefinitions(valueNode, api.Location)
 			if err != nil {
 				return StacktraceNewWrapped("unmarshal trait definitions", err, api.Location, WithNodePosition(valueNode))
@@ -911,23 +1016,50 @@ func (api *APIFragment) UnmarshalYAML(node *yaml.Node) error {
 		default:
 			switch {
 			case IsCustomDomainExtensionNode(keyNode.Value):
-				name, de, err := api.raml.unmarshalCustomDomainExtension(api.Location, keyNode, valueNode)
+				de, err := api.raml.unmarshalCustomDomainExtension(api.Location, keyNode, valueNode)
 				if err != nil {
 					return StacktraceNewWrapped("unmarshal custom domain extension", err, api.Location, WithNodePosition(valueNode))
 				}
-				api.CustomDomainProperties.Set(name, de)
+				api.CustomDomainProperties.Set(de.Name, de)
 			case IsEndPoint(keyNode.Value):
-				endpoint, err := api.raml.makeEndpoint(valueNode, api.Location, keyNode.Value, "")
+				sep, err := api.raml.makeSourceEndPoint(keyNode, valueNode, api.Location, "")
 				if err != nil {
 					return StacktraceNewWrapped("make endpoint", err, api.Location, WithNodePosition(valueNode))
 				}
-				api.EndPoints.Set(keyNode.Value, endpoint)
+				api.sourceEndPoints = append(api.sourceEndPoints, sep)
 			default:
-				return StacktraceNew("unknown field", api.Location, stacktrace.WithInfo("field", keyNode.Value))
+				return StacktraceNew("unknown field", api.Location, WithNodePosition(keyNode), stacktrace.WithInfo("field", keyNode.Value))
 			}
 		}
 	}
 
+	// Validate that title is present
+	if !hasTitle {
+		return StacktraceNew("title is required", api.Location, WithNodePosition(node))
+	}
+
+	// Synthesize and validate base URI template parameters after both baseUri
+	// and baseUriParameters have been fully parsed.
+	if err := api.validateBaseURIParameters(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateBaseURIParameters parses the baseUri template once, synthesizes a
+// minimal string BaseShape for any template variable that lacks an explicit
+// baseUriParameters declaration, then cross-checks all declared parameters.
+func (api *APIFragment) validateBaseURIParameters() error {
+	if api.BaseURI == nil {
+		return nil
+	}
+	params, err := validateAndSynthesizeURIParameters(api.BaseURI.Value, api.BaseURIParameters, api.Location, api.BaseURI.ValuePos)
+	if err != nil {
+		return StacktraceNewWrapped("parse base uri", err, api.Location,
+			stacktrace.WithPosition(&api.BaseURI.ValuePos))
+	}
+	api.BaseURIParameters = params
 	return nil
 }
 
@@ -944,12 +1076,12 @@ func (api *APIFragment) preProcess(node *yaml.Node) ([]*yaml.Node, error) {
 			if err := api.unmarshalProtocols(valueNode); err != nil {
 				return nil, StacktraceNewWrapped("unmarshal protocols", err, api.Location, WithNodePosition(valueNode))
 			}
-			api.raml.globalProtocols = api.Protocols
-		case "mediaType":
-			if err := api.unmarshalMediaType(valueNode); err != nil {
+			api.raml.globalProtocols = nodeStringValues(api.Protocols)
+		case FacetMediaType:
+			if err := api.unmarshalMediaType(keyNode, valueNode); err != nil {
 				return nil, StacktraceNewWrapped("unmarshal media type", err, api.Location, WithNodePosition(valueNode))
 			}
-			api.raml.globalMediaType = api.MediaType
+			api.raml.globalMediaType = nodeStringValues(api.MediaType)
 		case FacetSecuredBy:
 			securitySchemes, err := api.raml.makeSecuritySchemes(valueNode, api.Location)
 			if err != nil {
@@ -973,14 +1105,14 @@ func (r *RAML) unmarshalTraitDefinitions(node *yaml.Node, location string) (*ord
 
 	traitDefs := orderedmap.New[string, *TraitDefinition](len(node.Content) / 2)
 	for j := 0; j != len(node.Content); j += 2 {
-		nodeName := node.Content[j].Value
+		keyNode := node.Content[j]
 		data := node.Content[j+1]
 
-		traitDef, err := r.makeTraitDefinition(data, location)
+		traitDef, err := r.makeTraitDefinition(keyNode, data, location)
 		if err != nil {
 			return nil, StacktraceNewWrapped("make traits", err, location, WithNodePosition(data))
 		}
-		traitDefs.Set(nodeName, traitDef)
+		traitDefs.Set(keyNode.Value, traitDef)
 	}
 	return traitDefs, nil
 }
@@ -994,43 +1126,82 @@ func (r *RAML) unmarshalSecuritySchemes(node *yaml.Node, location string) (*orde
 
 	securitySchemeDefs := orderedmap.New[string, *SecuritySchemeDefinition](len(node.Content) / 2)
 	for j := 0; j != len(node.Content); j += 2 {
-		nodeName := node.Content[j].Value
+		keyNode := node.Content[j]
 		data := node.Content[j+1]
 
-		securityScheme, err := r.makeSecuritySchemeDefinition(data, location)
+		securityScheme, err := r.makeSecuritySchemeDefinition(keyNode, data, location)
 		if err != nil {
 			return nil, StacktraceNewWrapped("make security scheme definition", err, location, WithNodePosition(data))
 		}
-		securitySchemeDefs.Set(nodeName, securityScheme)
+		securitySchemeDefs.Set(keyNode.Value, securityScheme)
 	}
 	return securitySchemeDefs, nil
 }
 
-func (api *APIFragment) unmarshalMediaType(node *yaml.Node) error {
+func (api *APIFragment) unmarshalMediaType(keyNode, node *yaml.Node) error {
 	if node.Kind == yaml.ScalarNode {
-		if node.Tag != TagStr {
-			return StacktraceNew("media type must be a string", api.Location, WithNodePosition(node))
+		fragmentPath, rn, err := api.raml.resolveInclude(node, api.Location)
+		if err != nil {
+			return StacktraceNewWrapped("resolve include", err, api.Location, WithNodePosition(node))
 		}
-		api.MediaType = []string{node.Value}
-		return nil
+		if rn.Tag != TagStr {
+			return StacktraceNew("media type must be a string", api.Location, WithNodePosition(keyNode))
+		}
+		m := MakeNode(rn.Value, keyNode, node, api.Location, fragmentPath)
+		if !isValidMediaType(m.Value) {
+			return StacktraceNew("media type: invalid media type "+m.Value, api.Location, WithNodePosition(node))
+		}
+		api.MediaType = []*Node[string]{m}
+	} else if node.Kind == yaml.SequenceNode {
+		mediaType := make([]*Node[string], len(node.Content))
+		for i, v := range node.Content {
+			fragmentPath, ri, err := api.raml.resolveInclude(v, api.Location)
+			if err != nil {
+				return StacktraceNewWrapped("resolve include", err, api.Location, WithNodePosition(v))
+			}
+			var val string
+			if err := ri.Decode(&val); err != nil {
+				return StacktraceNewWrapped("parse media type item", err, api.Location, WithNodePosition(v))
+			}
+			m := MakeSeqNode(val, v, api.Location, fragmentPath)
+			if !isValidMediaType(m.Value) {
+				return StacktraceNew("media type: invalid media type "+m.Value, api.Location, WithNodePosition(v))
+			}
+			mediaType[i] = m
+		}
+		api.MediaType = mediaType
+	} else {
+		return StacktraceNew("media type must be a string or sequence", api.Location, WithNodePosition(node))
 	}
-	if err := node.Decode(&api.MediaType); err != nil {
-		return StacktraceNewWrapped("parse media type: value node decode", err, api.Location, WithNodePosition(node))
+	if len(api.MediaType) == 0 {
+		return StacktraceNew("media type must not be empty", api.Location, WithNodePosition(node))
 	}
 	return nil
 }
 
 func (api *APIFragment) unmarshalProtocols(node *yaml.Node) error {
-	if node.Kind == yaml.ScalarNode {
-		if node.Tag != TagStr {
-			return StacktraceNew("protocols must be a string", api.Location, WithNodePosition(node))
+	if node.Kind != yaml.SequenceNode {
+		return StacktraceNew("protocols must be an array", api.Location, WithNodePosition(node))
+	}
+	protocols := make([]*Node[string], len(node.Content))
+	for i, item := range node.Content {
+		fragmentPath, ri, err := api.raml.resolveInclude(item, api.Location)
+		if err != nil {
+			return StacktraceNewWrapped("resolve include", err, api.Location, WithNodePosition(item))
 		}
-		api.Protocols = []string{node.Value}
-		return nil
+		var val string
+		if err := ri.Decode(&val); err != nil {
+			return StacktraceNewWrapped("parse protocol item", err, api.Location, WithNodePosition(item))
+		}
+		if !isValidProtocol(val) {
+			return StacktraceNew("unknown protocol", api.Location, WithNodePosition(item))
+		}
+		protocols[i] = MakeSeqNode(val, item, api.Location, fragmentPath)
 	}
-	if err := node.Decode(&api.Protocols); err != nil {
-		return StacktraceNewWrapped("parse protocols: value node decode", err, api.Location, WithNodePosition(node))
+	if len(protocols) == 0 {
+		return StacktraceNew("protocols must not be empty", api.Location, WithNodePosition(node))
 	}
+	api.Protocols = protocols
 	return nil
 }
 
@@ -1043,14 +1214,14 @@ func (api *APIFragment) unmarshalBaseURIParameters(node *yaml.Node) error {
 
 	api.BaseURIParameters = orderedmap.New[string, *BaseShape](len(node.Content) / 2)
 	for j := 0; j != len(node.Content); j += 2 {
-		nodeName := node.Content[j].Value
-		data := node.Content[j+1]
+		keyNode := node.Content[j]
+		valueNode := node.Content[j+1]
 
-		shape, err := api.raml.makeNewShapeYAML(data, nodeName, api.Location)
+		shape, err := api.raml.makeNewShapeYAML(keyNode, valueNode, api.Location)
 		if err != nil {
-			return StacktraceNewWrapped("make new shape yaml", err, api.Location, WithNodePosition(node))
+			return StacktraceNewWrapped("make new shape yaml", err, api.Location, WithNodePosition(keyNode))
 		}
-		api.BaseURIParameters.Set(nodeName, shape)
+		api.BaseURIParameters.Set(keyNode.Value, shape)
 		api.raml.PutTypeDefinitionIntoFragment(api.Location, shape)
 	}
 	return nil

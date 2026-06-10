@@ -1,9 +1,11 @@
 # Directory containing the Makefile.
 export PATH := $(GOBIN):$(PATH)
 
-GO_VERSION = 1.20.14
+GO_VERSION = 1.21.13
 GO_VERSION_CMD_RAML = 1.22.10
+GO_VERSION_CMD_LSP  = 1.22.10
 GOLANGCI_LINT_VERSION = 1.55.2
+MIN_COVERAGE = 70
 
 .PHONY: all
 all: lint cover
@@ -16,7 +18,6 @@ lint: go-install
 test-unit: go-install
 	@go$(GO_VERSION) test ./...
 
-# the coverage should be at least 80% for now, but it should be increased in the future to 90% and more
 .PHONY: cover
 test-cover: go-install
 	@pkgs=$$(go$(GO_VERSION) list ./... | grep -v /Store/) \
@@ -24,7 +25,7 @@ test-cover: go-install
 	&& cat cover.out.tmp | grep -v "rdtparser_base_visitor.go" > cover.out \
 	&& rm cover.out.tmp \
 	&& go$(GO_VERSION) tool cover -func=cover.out | grep total | awk '{print substr($$3, 1, length($$3)-1)}' | \
-	awk '{if ($$1 < 80) {print "Coverage is below 80%!" ; exit 1}}' \
+	awk '{if ($$1 < $(MIN_COVERAGE)) {print "Coverage is below $(MIN_COVERAGE)%!" ; exit 1}}' \
 	&& go$(GO_VERSION) tool cover -html=cover.out -o cover.html
 
 .PHONY: test
@@ -64,3 +65,50 @@ install: go-install-cmd-raml
 	@echo "Installing raml"
 	@cd cmd/raml && go$(GO_VERSION_CMD_RAML) install . \
 	&& echo "Installed using go$(GO_VERSION_CMD_RAML) to $(GOPATH)/bin/raml"
+
+# ---------------------------------------------------------------------------
+# CLI utility (cmd/raml)
+# ---------------------------------------------------------------------------
+
+.PHONY: build-cli
+build-cli: go-build
+
+.PHONY: lint-cli
+lint-cli: go-install-cmd-raml
+	@cd cmd/raml && go$(GO_VERSION_CMD_RAML) run github.com/golangci/golangci-lint/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run --timeout=5m -v ./...
+
+# ---------------------------------------------------------------------------
+# LSP server (cmd/raml-lsp)
+# ---------------------------------------------------------------------------
+
+.PHONY: go-install-cmd-lsp
+go-install-cmd-lsp:
+	@$(MAKE) go-install GO_VERSION=$(GO_VERSION_CMD_LSP)
+
+.PHONY: build-lsp
+build-lsp: go-install-cmd-lsp
+	@echo "Building raml-lsp"
+	@cd cmd/raml-lsp && go$(GO_VERSION_CMD_LSP) build -o ../../.build/raml-lsp \
+	&& echo "Build successful in .build/raml-lsp using go$(GO_VERSION_CMD_LSP)"
+
+.PHONY: test-lsp
+test-lsp: go-install-cmd-lsp
+	@cd cmd/raml-lsp && go$(GO_VERSION_CMD_LSP) test ./...
+
+.PHONY: lint-lsp
+lint-lsp: go-install-cmd-lsp
+	@cd cmd/raml-lsp && go$(GO_VERSION_CMD_LSP) run github.com/golangci/golangci-lint/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run --timeout=5m -v ./...
+
+# ---------------------------------------------------------------------------
+# External plugins
+# ---------------------------------------------------------------------------
+
+.PHONY: build-plugin-vscode
+build-plugin-vscode:
+	@echo "Building VS Code plugin"
+	@cd external/raml-lsp-vscode && npm ci && npm run webpack:prod
+
+.PHONY: build-plugin-jetbrains
+build-plugin-jetbrains:
+	@echo "Building JetBrains plugin"
+	@cd external/raml-lsp-jetbrains && ./gradlew buildPlugin

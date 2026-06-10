@@ -10,23 +10,33 @@ import (
 )
 
 type HTTPAction interface {
-	appendBody(node *yaml.Node, mediaType string) error
+	appendBody(k, v *yaml.Node, mediaType string) error
 }
 
 type Operation struct {
 	ID int64
 
-	DisplayName string
-	Description string
+	DisplayName *ScalarFacet[string]
+	Description *ScalarFacet[string]
 
 	Traits []*Trait
 
-	Protocols []string
+	Protocols []*Node[string]
 	SecuredBy []*SecurityScheme
+	// explicitSecuredBy is true when the operation's own RAML source explicitly
+	// declared a securedBy facet (as opposed to inheriting the API-level default).
+	// Used during trait/resource-type merge to avoid duplicating the global
+	// securedBy onto operations that never declared their own.
+	explicitSecuredBy bool
+
+	// RTTraits holds traits contributed by the applied resource type (method-level).
+	// These are kept separate from Traits (method's own) to preserve the correct
+	// application order defined by the spec: method → resource → RT-method → RT-resource.
+	RTTraits []*Trait
 
 	Method          string
 	Headers         *orderedmap.OrderedMap[string, Property]
-	QueryParameters *orderedmap.OrderedMap[string, Property] // TODO: Maybe can be combined?
+	QueryParameters *orderedmap.OrderedMap[string, Property]
 	QueryString     *BaseShape
 	Request         *Request
 	Responses       *orderedmap.OrderedMap[int, *Response]
@@ -34,48 +44,13 @@ type Operation struct {
 	CustomDomainProperties *orderedmap.OrderedMap[string, *DomainExtension]
 
 	Location string
-	stacktrace.Position
-	raml *RAML
-}
-
-func (r *RAML) makeOperation(method string, location string, node *yaml.Node) (*Operation, error) {
-	operation := &Operation{
-		Method: method,
-
-		Protocols: r.globalProtocols,
-		SecuredBy: r.globalSecuredBy,
-
-		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
-
-		raml:     r,
-		Position: stacktrace.Position{Line: node.Line, Column: node.Column},
-		Location: location,
-	}
-
-	if err := operation.decode(node); err != nil {
-		return nil, StacktraceNewWrapped("decode operation", err, location, WithNodePosition(node))
-	}
-
-	return operation, nil
-}
-
-func (r *RAML) makeParametrizedOperation(location string, node *yaml.Node) (*Operation, error) {
-	operation := &Operation{
-		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
-
-		raml:     r,
-		Position: stacktrace.Position{Line: node.Line, Column: node.Column},
-		Location: location,
-	}
-
-	if err := operation.decode(node); err != nil {
-		return nil, StacktraceNewWrapped("decode operation", err, location, WithNodePosition(node))
-	}
-
-	return operation, nil
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
+	raml     *RAML
 }
 
 func (r *RAML) unmarshalHeaders(node *yaml.Node, location string) (*orderedmap.OrderedMap[string, Property], error) {
+	location = r.locationOf(node, location)
 	if node.Tag == TagNull {
 		return nil, nil
 	} else if node.Kind != yaml.MappingNode {
@@ -84,22 +59,24 @@ func (r *RAML) unmarshalHeaders(node *yaml.Node, location string) (*orderedmap.O
 
 	headers := orderedmap.New[string, Property](len(node.Content) / 2)
 	for j := 0; j != len(node.Content); j += 2 {
-		nodeName := node.Content[j].Value
-		data := node.Content[j+1]
+		keyNode := node.Content[j]
+		valueNode := node.Content[j+1]
 
-		propertyName, hasImplicitOptional := r.chompImplicitOptional(nodeName)
-		property, err := r.makeProperty(nodeName, propertyName, data, location, hasImplicitOptional)
+		entryLoc := r.locationOf(valueNode, location)
+		propertyName, hasImplicitOptional := chompImplicitOptional(keyNode.Value)
+		property, err := r.makeProperty(keyNode, valueNode, propertyName, entryLoc, hasImplicitOptional)
 		if err != nil {
-			return nil, StacktraceNewWrapped("make property", err, location,
-				WithNodePosition(data))
+			return nil, StacktraceNewWrapped("make property", err, entryLoc,
+				WithNodePosition(keyNode))
 		}
 		headers.Set(property.Name, property)
-		r.PutTypeDefinitionIntoFragment(location, property.Base)
+		r.PutTypeDefinitionIntoFragment(entryLoc, property.Base)
 	}
 	return headers, nil
 }
 
 func (r *RAML) unmarshalQueryParameters(node *yaml.Node, location string) (*orderedmap.OrderedMap[string, Property], error) {
+	location = r.locationOf(node, location)
 	if node.Tag == TagNull {
 		return nil, nil
 	} else if node.Kind != yaml.MappingNode {
@@ -108,176 +85,30 @@ func (r *RAML) unmarshalQueryParameters(node *yaml.Node, location string) (*orde
 
 	queryParameters := orderedmap.New[string, Property](len(node.Content) / 2)
 	for j := 0; j != len(node.Content); j += 2 {
-		nodeName := node.Content[j].Value
-		data := node.Content[j+1]
+		keyNode := node.Content[j]
+		valueNode := node.Content[j+1]
 
-		propertyName, hasImplicitOptional := r.chompImplicitOptional(nodeName)
-		property, err := r.makeProperty(nodeName, propertyName, data, location, hasImplicitOptional)
+		entryLoc := r.locationOf(valueNode, location)
+		propertyName, hasImplicitOptional := chompImplicitOptional(keyNode.Value)
+		property, err := r.makeProperty(keyNode, valueNode, propertyName, entryLoc, hasImplicitOptional)
 		if err != nil {
-			return nil, StacktraceNewWrapped("make property", err, location,
-				WithNodePosition(data))
+			return nil, StacktraceNewWrapped("make property", err, entryLoc,
+				WithNodePosition(keyNode))
 		}
 		queryParameters.Set(property.Name, property)
-		r.PutTypeDefinitionIntoFragment(location, property.Base)
+		r.PutTypeDefinitionIntoFragment(entryLoc, property.Base)
 	}
 	return queryParameters, nil
 }
 
-func (r *RAML) unmarshalQueryString(node *yaml.Node, location string, name string) (*BaseShape, error) {
-	shape, err := r.makeNewShapeYAML(node, name, location)
+func (r *RAML) unmarshalQueryString(k, v *yaml.Node, location string) (*BaseShape, error) {
+	location = r.locationOf(v, location)
+	shape, err := r.makeNewShapeYAML(k, v, location)
 	if err != nil {
-		return nil, StacktraceNewWrapped("make new shape yaml", err, location, WithNodePosition(node))
+		return nil, StacktraceNewWrapped("make new shape yaml", err, location, WithNodePosition(k))
 	}
 	r.PutTypeDefinitionIntoFragment(location, shape)
 	return shape, nil
-}
-
-func (o *Operation) decode(node *yaml.Node) error {
-	if node.Tag == TagNull {
-		return nil
-	} else if node.Kind != yaml.MappingNode {
-		return StacktraceNew("operation must be a mapping node", o.Location, WithNodePosition(node))
-	}
-
-	for i := 0; i < len(node.Content); i += 2 {
-		keyNode := node.Content[i]
-		valueNode := node.Content[i+1]
-		switch keyNode.Value {
-		case FacetDisplayName:
-			if err := valueNode.Decode(&o.DisplayName); err != nil {
-				return StacktraceNewWrapped("decode displayName", err, o.Location, WithNodePosition(valueNode))
-			}
-		case FacetDescription:
-			if err := valueNode.Decode(&o.Description); err != nil {
-				return StacktraceNewWrapped("decode description", err, o.Location, WithNodePosition(valueNode))
-			}
-		case FacetProtocols:
-			if err := valueNode.Decode(&o.Protocols); err != nil {
-				return StacktraceNewWrapped("decode protocols", err, o.Location, WithNodePosition(valueNode))
-			}
-		case FacetSecuredBy:
-			securitySchemes, err := o.raml.makeSecuritySchemes(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("make security schemes", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.SecuredBy = securitySchemes
-		case FacetHeaders:
-			headers, err := o.raml.unmarshalHeaders(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("unmarshal headers", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.Headers = headers
-		case FacetQueryParameters:
-			if o.QueryString != nil {
-				return StacktraceNew("queryParameters and queryString are mutually exclusive", o.Location, WithNodePosition(valueNode))
-			}
-			params, err := o.raml.unmarshalQueryParameters(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("unmarshal query parameters", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.QueryParameters = params
-		case FacetQueryString:
-			if o.QueryParameters != nil {
-				return StacktraceNew("queryParameters and queryString are mutually exclusive", o.Location, WithNodePosition(valueNode))
-			}
-			shape, err := o.raml.unmarshalQueryString(valueNode, o.Location, keyNode.Value)
-			if err != nil {
-				return StacktraceNewWrapped("unmarshal query string", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.QueryString = shape
-		case FacetBody:
-			request, err := o.raml.makeRequest(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("make request", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.Request = request
-		case FacetResponses:
-			responses, err := o.raml.makeResponses(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("make responses", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.Responses = responses
-		case FacetIs:
-			traits, err := o.raml.makeTraits(valueNode, o.Location)
-			if err != nil {
-				return StacktraceNewWrapped("make traits", err, o.Location, WithNodePosition(valueNode))
-			}
-			o.Traits = traits
-		default:
-			if IsCustomDomainExtensionNode(keyNode.Value) {
-				name, de, err := o.raml.unmarshalCustomDomainExtension(o.Location, keyNode, valueNode)
-				if err != nil {
-					return StacktraceNewWrapped("unmarshal custom domain extension", err, o.Location, WithNodePosition(valueNode))
-				}
-				o.CustomDomainProperties.Set(name, de)
-			} else {
-				return StacktraceNew("unknown field", o.Location, stacktrace.WithInfo("field", keyNode.Value))
-			}
-		}
-	}
-	return nil
-}
-
-func (o *Operation) merge(source *Operation) {
-	// TODO: Shapes merge
-	if o.DisplayName == "" {
-		o.DisplayName = source.DisplayName
-	}
-	if o.Description == "" {
-		o.Description = source.Description
-	}
-	o.Protocols = append(o.Protocols, source.Protocols...)
-	o.SecuredBy = append(o.SecuredBy, source.SecuredBy...)
-	if o.Headers == nil {
-		o.Headers = source.Headers
-	} else if source.Headers != nil {
-		for pair := source.Headers.Oldest(); pair != nil; pair = pair.Next() {
-			key := pair.Key
-			value := pair.Value
-			if _, ok := o.Headers.Get(key); !ok {
-				o.Headers.Set(key, value)
-			}
-		}
-	}
-	if o.QueryParameters == nil {
-		o.QueryParameters = source.QueryParameters
-	} else if source.QueryParameters != nil {
-		for pair := source.QueryParameters.Oldest(); pair != nil; pair = pair.Next() {
-			key := pair.Key
-			value := pair.Value
-			if _, ok := o.QueryParameters.Get(key); !ok {
-				o.QueryParameters.Set(key, value)
-			}
-		}
-	}
-	if o.QueryString == nil {
-		o.QueryString = source.QueryString
-	}
-	if o.Request == nil {
-		o.Request = source.Request
-	}
-	if o.Responses == nil {
-		o.Responses = source.Responses
-	} else if source.Responses != nil {
-		for pair := source.Responses.Oldest(); pair != nil; pair = pair.Next() {
-			key := pair.Key
-			value := pair.Value
-			if _, ok := o.Responses.Get(key); !ok {
-				o.Responses.Set(key, value)
-			}
-		}
-	}
-	if o.CustomDomainProperties == nil {
-		o.CustomDomainProperties = source.CustomDomainProperties
-	} else if source.CustomDomainProperties != nil {
-		for pair := source.CustomDomainProperties.Oldest(); pair != nil; pair = pair.Next() {
-			key := pair.Key
-			value := pair.Value
-			if _, ok := o.CustomDomainProperties.Get(key); !ok {
-				o.CustomDomainProperties.Set(key, value)
-			}
-		}
-	}
 }
 
 type Request struct {
@@ -288,75 +119,81 @@ type Request struct {
 	// NOTE: Request cannot have custom annotations, those are defined on Operation level in RAML.
 
 	Location string
-	stacktrace.Position
-	raml *RAML
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
+	raml     *RAML
 }
 
-func (r *RAML) makeRequest(node *yaml.Node, location string) (*Request, error) {
+func (r *RAML) makeRequest(k, v *yaml.Node, location string) (*Request, error) {
+	location = r.locationOf(v, location)
 	request := &Request{
+		ID:     r.generateSequenceID(),
 		Bodies: orderedmap.New[string, *Body](),
 
 		raml:     r,
-		Position: stacktrace.Position{Line: node.Line, Column: node.Column},
+		KeyPos:   NewNodePosition(k),
+		ValuePos: NewNodePosition(v),
 		Location: location,
 	}
 
-	if err := r.decodeMediaTypeNode(request, node, location); err != nil {
-		return nil, StacktraceNewWrapped("decode media type node", err, location, WithNodePosition(node))
+	r.storeEntityNode(request.ID, k, v)
+
+	if err := r.decodeMediaTypeNode(request, k, v, location); err != nil {
+		return nil, StacktraceNewWrapped("decode media type node", err, location, WithNodePosition(v))
 	}
 
 	return request, nil
 }
 
-func (r *Request) appendBody(node *yaml.Node, mediaType string) error {
-	body, err := r.raml.makeBody(node, r.Location, mediaType)
+func (r *Request) appendBody(k, v *yaml.Node, mediaType string) error {
+	body, err := r.raml.makeBody(k, v, r.Location, mediaType)
 	if err != nil {
-		return StacktraceNewWrapped("make body", err, r.Location, WithNodePosition(node))
+		return StacktraceNewWrapped("make body", err, r.Location, WithNodePosition(k))
 	}
 	r.Bodies.Set(mediaType, body)
 	return nil
 }
 
-func (r *RAML) decodeMediaTypeNode(action HTTPAction, node *yaml.Node, location string) error {
+func (r *RAML) decodeMediaTypeNode(action HTTPAction, k, v *yaml.Node, location string) error {
 	// TODO: Common for request/responses
-	switch node.Kind {
+	switch v.Kind {
 	case yaml.ScalarNode:
-		if node.Tag == TagNull {
+		if v.Tag == TagNull {
 			return nil
 		}
 		if r.globalMediaType == nil {
-			return StacktraceNew("explicit media type is required", location, WithNodePosition(node))
+			return StacktraceNew("explicit media type is required", location, WithNodePosition(k))
 		}
 		for _, mediaType := range r.globalMediaType {
-			if err := action.appendBody(node, mediaType); err != nil {
-				return StacktraceNewWrapped("append request body", err, location, WithNodePosition(node))
+			if err := action.appendBody(k, v, mediaType); err != nil {
+				return StacktraceNewWrapped("append request body", err, location, WithNodePosition(k))
 			}
 		}
 	case yaml.MappingNode:
-		mediaTypeNodes, err := r.collectMediaTypes(node, location)
+		mediaTypeNodes, err := r.collectMediaTypes(v, location)
 		if err != nil {
-			return StacktraceNewWrapped("collect media types", err, location, WithNodePosition(node))
+			return StacktraceNewWrapped("collect media types", err, location, WithNodePosition(k))
 		}
 		if mediaTypeNodes == nil {
 			if r.globalMediaType == nil {
-				return StacktraceNew("explicit media type is required", location, WithNodePosition(node))
+				return StacktraceNew("explicit media type is required", location, WithNodePosition(k))
 			}
 			for _, mediaType := range r.globalMediaType {
-				if err = action.appendBody(node, mediaType); err != nil {
-					return StacktraceNewWrapped("append request body", err, location, WithNodePosition(node))
+				if err = action.appendBody(k, v, mediaType); err != nil {
+					return StacktraceNewWrapped("append request body", err, location, WithNodePosition(k))
 				}
 			}
 		} else {
 			for i := 0; i != len(mediaTypeNodes); i += 2 {
 				keyNode := mediaTypeNodes[i]
 				valueNode := mediaTypeNodes[i+1]
-				if err = action.appendBody(valueNode, keyNode.Value); err != nil {
-					return StacktraceNewWrapped("append request body", err, location, WithNodePosition(node))
+				if err = action.appendBody(keyNode, valueNode, keyNode.Value); err != nil {
+					return StacktraceNewWrapped("append request body", err, location, WithNodePosition(keyNode))
 				}
 			}
 		}
 	default:
-		return StacktraceNew("request must be either scalar or mapping node", location, WithNodePosition(node))
+		return StacktraceNew("request must be either scalar or mapping node", location, WithNodePosition(k))
 	}
 	return nil
 }
@@ -404,6 +241,7 @@ type Response struct {
 }
 
 func (r *RAML) makeResponses(node *yaml.Node, location string) (*orderedmap.OrderedMap[int, *Response], error) {
+	location = r.locationOf(node, location)
 	if node.Tag == TagNull {
 		return nil, nil
 	} else if node.Kind != yaml.MappingNode {
@@ -415,25 +253,33 @@ func (r *RAML) makeResponses(node *yaml.Node, location string) (*orderedmap.Orde
 		statusCode := node.Content[j]
 		data := node.Content[j+1]
 
+		entryLoc := r.locationOf(data, location)
 		if !IsStatusCode(statusCode.Value) {
-			return nil, StacktraceNew("status code must be a 3-digit number", location, WithNodePosition(statusCode))
+			return nil, StacktraceNew("status code must be a 3-digit number", entryLoc, WithNodePosition(statusCode))
 		}
 		intStatusCode, err := strconv.Atoi(statusCode.Value)
 		if err != nil {
-			return nil, StacktraceNewWrapped("parse status code", err, location, WithNodePosition(statusCode))
+			return nil, StacktraceNewWrapped("parse status code", err, entryLoc, WithNodePosition(statusCode))
 		}
 
-		response, err := r.makeResponse(data, location, intStatusCode)
+		// Check for duplicate status codes
+		if _, ok := responses.Get(intStatusCode); ok {
+			return nil, StacktraceNew("duplicate status code", entryLoc, WithNodePosition(statusCode))
+		}
+
+		response, err := r.makeResponse(statusCode, data, entryLoc, intStatusCode)
 		if err != nil {
-			return nil, StacktraceNewWrapped("make response", err, location, WithNodePosition(data))
+			return nil, StacktraceNewWrapped("make response", err, entryLoc, WithNodePosition(data))
 		}
 		responses.Set(intStatusCode, response)
 	}
 	return responses, nil
 }
 
-func (r *RAML) makeResponse(node *yaml.Node, location string, statusCode int) (*Response, error) {
+func (r *RAML) makeResponse(k, v *yaml.Node, location string, statusCode int) (*Response, error) {
+	location = r.locationOf(v, location)
 	response := &Response{
+		ID:         r.generateSequenceID(),
 		StatusCode: statusCode,
 		Headers:    orderedmap.New[string, Property](0),
 		Bodies:     orderedmap.New[string, *Body](0),
@@ -441,12 +287,14 @@ func (r *RAML) makeResponse(node *yaml.Node, location string, statusCode int) (*
 		CustomDomainProperties: orderedmap.New[string, *DomainExtension](0),
 
 		raml:     r,
-		Position: stacktrace.Position{Line: node.Line, Column: node.Column},
+		Position: stacktrace.Position{Line: k.Line, Column: k.Column, EndLine: NodeEndLine(v)},
 		Location: location,
 	}
 
-	if err := response.decode(node); err != nil {
-		return nil, StacktraceNewWrapped("decode response", err, location, WithNodePosition(node))
+	r.storeEntityNode(response.ID, k, v)
+
+	if err := response.decode(v); err != nil {
+		return nil, StacktraceNewWrapped("decode response", err, location, WithNodePosition(v))
 	}
 
 	return response, nil
@@ -477,29 +325,29 @@ func (r *Response) decode(node *yaml.Node) error {
 				return StacktraceNewWrapped("unmarshal headers", err, r.Location, WithNodePosition(valueNode))
 			}
 			r.Headers = headers
-		case "body":
-			if err := r.raml.decodeMediaTypeNode(r, valueNode, r.Location); err != nil {
+		case FacetBody:
+			if err := r.raml.decodeMediaTypeNode(r, keyNode, valueNode, r.Location); err != nil {
 				return StacktraceNewWrapped("decode media type node", err, r.Location, WithNodePosition(valueNode))
 			}
 		default:
 			if IsCustomDomainExtensionNode(keyNode.Value) {
-				name, de, err := r.raml.unmarshalCustomDomainExtension(r.Location, keyNode, valueNode)
+				de, err := r.raml.unmarshalCustomDomainExtension(r.Location, keyNode, valueNode)
 				if err != nil {
 					return StacktraceNewWrapped("unmarshal custom domain extension", err, r.Location, WithNodePosition(valueNode))
 				}
-				r.CustomDomainProperties.Set(name, de)
+				r.CustomDomainProperties.Set(de.Name, de)
 			} else {
-				return StacktraceNew("unknown field", r.Location, stacktrace.WithInfo("field", keyNode.Value))
+				return StacktraceNew("unknown field", r.Location, WithNodePosition(keyNode), stacktrace.WithInfo("field", keyNode.Value))
 			}
 		}
 	}
 	return nil
 }
 
-func (r *Response) appendBody(node *yaml.Node, mediaType string) error {
-	body, err := r.raml.makeBody(node, r.Location, mediaType)
+func (r *Response) appendBody(k, v *yaml.Node, mediaType string) error {
+	body, err := r.raml.makeBody(k, v, r.Location, mediaType)
 	if err != nil {
-		return StacktraceNewWrapped("make body", err, r.Location, WithNodePosition(node))
+		return StacktraceNewWrapped("make body", err, r.Location, WithNodePosition(k))
 	}
 	r.Bodies.Set(mediaType, body)
 	return nil
@@ -521,30 +369,35 @@ type Body struct {
 	// NOTE: Body cannot have annotations. Those are defined on Shape level in RAML.
 
 	Location string
-	stacktrace.Position
-	raml *RAML
+	KeyPos   stacktrace.Position
+	ValuePos stacktrace.Position
+	raml     *RAML
 }
 
-func (r *RAML) makeBody(node *yaml.Node, location string, mediaType string) (*Body, error) {
+func (r *RAML) makeBody(k, v *yaml.Node, location string, mediaType string) (*Body, error) {
+	location = r.locationOf(v, location)
 	body := &Body{
+		ID:        r.generateSequenceID(),
 		MediaType: mediaType,
-
-		raml:     r,
-		Position: stacktrace.Position{Line: node.Line, Column: node.Column},
-		Location: location,
+		raml:      r,
+		KeyPos:    NewNodePosition(k),
+		ValuePos:  NewNodePosition(v),
+		Location:  location,
 	}
 
-	if err := body.decode(node); err != nil {
-		return nil, StacktraceNewWrapped("decode body", err, location, WithNodePosition(node))
+	r.storeEntityNode(body.ID, k, v)
+
+	if err := body.decode(k, v); err != nil {
+		return nil, StacktraceNewWrapped("decode body", err, location, WithNodePosition(v))
 	}
 
 	return body, nil
 }
 
-func (b *Body) decode(node *yaml.Node) error {
-	shape, err := b.raml.makeNewShapeYAML(node, "response", b.Location)
+func (b *Body) decode(k, v *yaml.Node) error {
+	shape, err := b.raml.makeNewBodyShapeYAML(k, v, b.Location)
 	if err != nil {
-		return StacktraceNewWrapped("make new shape yaml", err, b.Location, WithNodePosition(node))
+		return StacktraceNewWrapped("make new shape yaml", err, b.Location, WithNodePosition(v))
 	}
 	b.Shape = shape
 	b.raml.PutTypeDefinitionIntoFragment(b.Location, shape)
